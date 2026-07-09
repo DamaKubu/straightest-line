@@ -31,11 +31,14 @@
   .clear { background:#2b333d; color:var(--text); font-size:14px; padding:12px; margin-top:12px; }
   .hint { color:var(--muted); font-size:13px; text-align:center; line-height:1.5; margin-top:8px; }
   .err { color:var(--bad); font-size:14px; text-align:center; margin-top:6px; }
+  .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
 </style>
 </head>
 <body>
 <h1>🛶 Straightest Line</h1>
 <div class="tag">Paddle ~1 km. Straightest track wins.</div>
+<div class="mode" id="mode"></div>
 
 <div class="card">
   <label for="name">Your name</label>
@@ -67,10 +70,24 @@
   recording <em>before</em> you push off. Any app works as long as it exports a <b>.gpx</b> file.
 </div>
 
-<script>
+<!-- ================================================================= -->
+<!--  FIREBASE CONFIG — paste yours between the quotes to enable the    -->
+<!--  shared live leaderboard. Leave as-is for single-device mode.      -->
+<!-- ================================================================= -->
+<script type="module">
+const firebaseConfig = {
+  apiKey:            "PASTE_API_KEY",
+  authDomain:        "PASTE_AUTH_DOMAIN",
+  projectId:         "PASTE_PROJECT_ID",
+  storageBucket:     "PASTE_STORAGE_BUCKET",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId:             "PASTE_APP_ID"
+};
+const CLOUD = !firebaseConfig.apiKey.startsWith("PASTE");
+
 const $ = id => document.getElementById(id);
 
-// ---- geometry ----
+// ---------- geometry ----------
 function haversine(a,b){
   const R=6371000, toR=x=>x*Math.PI/180;
   const dLat=toR(b.lat-a.lat), dLon=toR(b.lon-a.lon);
@@ -117,32 +134,71 @@ function parseGpx(text){
   }
   return p;
 }
+const keyOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'x';
 
-// ---- leaderboard (this device only) ----
-function load(){ try{ return JSON.parse(localStorage.getItem('board')||'[]'); }catch(e){ return []; } }
-function saveAll(b){ localStorage.setItem('board', JSON.stringify(b)); }
-function upsert(r){
-  const b=load();
-  const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
-  if(i>=0){ if(r.avg < b[i].avg) b[i]=r; }   // keep each paddler's best run
-  else b.push(r);
-  saveAll(b);
+// ---------- storage backends ----------
+let store;
+function localBackend(){
+  const load=()=>{ try{ return JSON.parse(localStorage.getItem('board')||'[]'); }catch(e){ return []; } };
+  return {
+    async submit(r){
+      const b=load(); const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
+      if(i>=0){ if(r.avg<b[i].avg) b[i]=r; } else b.push(r);
+      localStorage.setItem('board', JSON.stringify(b)); render(b);
+    },
+    watch(){ render(load()); },
+    async clear(){ localStorage.removeItem('board'); render([]); }
+  };
 }
-function render(){
-  const b=load().sort((a,c)=>a.avg-c.avg);
+
+// ---------- rendering ----------
+function render(rows){
+  const b=[...rows].sort((a,c)=>a.avg-c.avg);
   $('board').innerHTML = b.map((r,i)=>
-    `<tr class="${i===0?'win':''}"><td>${i+1}</td><td>${r.name}</td>`+
+    `<tr class="${i===0?'win':''}"><td>${i+1}</td><td>${escapeHtml(r.name)}</td>`+
     `<td class="score">${r.avg.toFixed(2)} m</td></tr>`).join('')
     || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
 }
+function escapeHtml(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 
-// ---- action ----
+// ---------- init backend ----------
+async function initBackend(){
+  if(CLOUD){
+    try{
+      const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+      const { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, deleteDoc, getDocs } =
+        await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
+      const app=initializeApp(firebaseConfig);
+      const db=getFirestore(app);
+      const col=collection(db,'runs');
+      store={
+        async submit(r){
+          const ref=doc(col, keyOf(r.name));
+          const cur=await getDoc(ref);
+          if(!cur.exists() || r.avg < cur.data().avg) await setDoc(ref, r);
+        },
+        watch(){ onSnapshot(col, snap=>render(snap.docs.map(d=>d.data()))); },
+        async clear(){ const s=await getDocs(col); for(const d of s.docs) await deleteDoc(d.ref); }
+      };
+      $('mode').innerHTML='<span class="dot" style="background:var(--good)"></span>Shared live leaderboard — everyone sees the same list';
+      return;
+    }catch(e){
+      $('mode').innerHTML='<span class="dot" style="background:var(--bad)"></span>Cloud failed ('+e.message+') — using this device only';
+    }
+  } else {
+    $('mode').innerHTML='<span class="dot" style="background:var(--warn)"></span>This device only (add Firebase config for a shared leaderboard)';
+  }
+  store=localBackend();
+}
+
+// ---------- action ----------
 $('scoreBtn').onclick=async ()=>{
   $('err').textContent='';
   const name=$('name').value.trim();
   const file=$('gpx').files[0];
   if(!name){ $('err').textContent='Please enter your name.'; return; }
   if(!file){ $('err').textContent='Please choose your GPX file.'; return; }
+  $('scoreBtn').disabled=true;
   try{
     const pts=parseGpx(await file.text());
     if(pts.length<5){ $('err').textContent='That GPX has too few track points.'; return; }
@@ -152,12 +208,14 @@ $('scoreBtn').onclick=async ()=>{
     $('scoreBig').textContent=s.avg.toFixed(2)+' m';
     $('scoreDetail').innerHTML=
       `rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · length ${Math.round(len)} m`;
-    upsert({name, avg:s.avg, rms:s.rms, max:s.max, len});
-    render();
+    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, len:Math.round(len) });
   }catch(e){ $('err').textContent='Could not read that file: '+e.message; }
+  finally{ $('scoreBtn').disabled=false; }
 };
-$('clearBtn').onclick=()=>{ if(confirm('Clear the whole leaderboard?')){ localStorage.removeItem('board'); render(); } };
-render();
+$('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard?')) await store.clear(); };
+
+await initBackend();
+store.watch();
 </script>
 </body>
 </html>
