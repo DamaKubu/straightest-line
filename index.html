@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Straightest Line — Kayak Contest</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root { --bg:#0e1116; --card:#1a1f27; --accent:#4cc2ff; --good:#37d67a;
           --warn:#f5a623; --bad:#ff5c5c; --text:#e6edf3; --muted:#8b98a5; }
@@ -34,12 +36,20 @@
   .warnmsg { color:var(--warn); font-size:13px; text-align:center; margin-top:6px; }
   .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+  #map { height:230px; border-radius:12px; background:#0e1116; }
+  .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
+  .legend b { color:var(--accent); } .legend .t { color:var(--warn); }
 </style>
 </head>
 <body>
 <h1>🛶 Straightest Line</h1>
 <div class="tag">Paddle the marked line. Closest to it wins.</div>
 <div class="mode" id="mode"></div>
+
+<div class="card">
+  <div id="map"></div>
+  <div class="legend"><b>▬ ideal course line</b> &nbsp;·&nbsp; <span class="t">▬ your track</span> (shown after upload)</div>
+</div>
 
 <div class="card">
   <label for="name">Your name</label>
@@ -126,7 +136,28 @@ function scoreTrack(rawPts){
   for(const p of seg){ const d=perp(p); sum+=d; sq+=d*d; if(d>mx) mx=d; }
   const n=seg.length;
   const coverage = Math.abs(t[hi]-t[lo])/L;         // fraction of the line actually paddled
-  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx, coverage };
+  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx, coverage, track:rawPts.slice(lo,hi+1) };
+}
+
+// ---------- mini map (Leaflet) ----------
+let map=null, trackLayer=null;
+function initMap(){
+  const el=$('map');
+  if(typeof L==='undefined'){ el.parentElement.style.display='none'; return; }
+  map=L.map(el,{attributionControl:false});
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+  const a=[BASELINE.a.lat,BASELINE.a.lon], b=[BASELINE.b.lat,BASELINE.b.lon];
+  L.polyline([a,b],{color:'#4cc2ff',weight:3}).addTo(map);
+  L.circleMarker(a,{radius:6,color:'#37d67a',fillColor:'#37d67a',fillOpacity:1}).addTo(map).bindTooltip('Start');
+  L.circleMarker(b,{radius:6,color:'#ff5c5c',fillColor:'#ff5c5c',fillOpacity:1}).addTo(map).bindTooltip('Finish');
+  map.fitBounds([a,b],{padding:[25,25]});
+  setTimeout(()=>map.invalidateSize(),200);
+}
+function drawTrack(latlons){
+  if(!map||!latlons.length) return;
+  if(trackLayer) map.removeLayer(trackLayer);
+  trackLayer=L.polyline(latlons.map(p=>[p.lat,p.lon]),{color:'#f5a623',weight:2}).addTo(map);
+  map.fitBounds(trackLayer.getBounds(),{padding:[20,20]});
 }
 
 // ---------- rendering ----------
@@ -187,12 +218,14 @@ $('scoreBtn').onclick=async ()=>{
     $('scoreBig').textContent=s.avg.toFixed(2)+' m';
     $('scoreDetail').innerHTML=`rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · covered ${(s.coverage*100).toFixed(0)}% of the line`;
     if(s.coverage<0.9) $('scoreWarn').textContent='⚠ Your track covers less than 90% of the course line — did you paddle the whole thing?';
+    drawTrack(s.track);
     await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage });
   }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
   finally{ $('scoreBtn').disabled=false; }
 };
 $('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard?')) await store.clear(); };
 
+initMap();
 initBackend().then(()=>store.watch());
 </script>
 </body>
