@@ -1,46 +1,54 @@
 # 🛶 Straightest Line — kayak contest scorer
 
-Paddle ~1 km. Whoever's GPS track is the **straightest** wins. Each paddler uploads
-their `.gpx` file (exported from Strava or any tracking app) and the page scores it as
-the **average distance (in metres) of their track from their best-fit straight line** —
-lowest score wins.
+Paddle the fixed **course line** (the `LineString` in `tiesė.kml`, ~4.3 km). Whoever's
+GPS track stays **closest to that line** wins. Each paddler uploads their `.gpx` file
+(exported from Strava or any tracking app) and gets scored as the **average distance
+(metres) of their track from the course line** — lowest wins.
 
-- `index.html` — the web page (host on GitHub Pages). Optional shared live leaderboard via Firebase.
-- `straightest.py` — offline scorer for a folder of `.gpx` files (needs a computer with Python).
+The approach and run-out are removed automatically: the track is clipped to the slice
+between the point nearest the **start** end (A) and the point nearest the **finish** end (B).
 
-## Publish the page (GitHub Pages)
+## Files
 
-1. Create a new **public** empty repo on github.com (e.g. `straightest-line`), no README.
-2. In this folder, point git at it and push:
-   ```
-   git remote add origin https://github.com/damakubu/straightest-line.git
-   git push -u origin main
-   ```
-3. On GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch →
-   Branch: `main` / `(root)` → Save.** After ~1 min your page is live at
-   `https://damakubu.github.io/straightest-line/`.
+- `index.html` — the web page paddlers use to upload a GPX and see the leaderboard.
+- `server.py` — tiny zero-dependency server that hosts the page + shared leaderboard.
+- `straightest.py` — offline scorer for a folder of `.gpx` files (backup).
+- `tiesė.kml` — the course definition (the `TIESĖ PLAUKIAMA LYGIAI` LineString).
 
-Without any further setup it already works in **single-device mode** (leaderboard stored in
-that one browser). To make one **shared live leaderboard** across everyone's phones, add Firebase:
+## Run the shared leaderboard (on a computer you leave on)
 
-## Shared leaderboard (Firebase — free)
+```
+python server.py
+```
 
-1. Go to <https://console.firebase.google.com> → **Add project** (any name, skip Analytics).
-2. **Build → Firestore Database → Create database → Start in *test mode* → pick a region.**
-   (Test mode allows open read/write — fine for a one-off event. It auto-locks after ~30 days.)
-3. Project **⚙️ Settings → General → Your apps → Web app (`</>`)** → register → copy the
-   `firebaseConfig` values.
-4. Paste them into the `firebaseConfig` block near the bottom of `index.html`
-   (replace every `PASTE_...`). Commit + push.
-5. The page header will show a green dot: **"Shared live leaderboard."** Everyone who opens
-   the URL uploads their own GPX and sees the same live ranking.
+It prints two URLs:
 
-> Security note: test-mode Firestore is world-writable. Fine for a friendly race; don't store
-> anything sensitive. For repeated use, lock the rules down later.
+- **Same WiFi:** phones open `http://<this-pc-ip>:8000` — everyone sees one live leaderboard.
+- **From anywhere** (people uploading from home): put a free tunnel in front of it:
+  ```
+  cloudflared tunnel --url http://localhost:8000
+  ```
+  and share the `https://…trycloudflare.com` URL it prints.
+
+Scores persist in `scores.json`; each paddler's best (lowest) run is kept.
+If the page can't reach the server it falls back to a single-device leaderboard.
+
+## Offline scoring (no server)
+
+Drop everyone's GPX into a folder (name each file after the paddler) and run:
+
+```
+python straightest.py path/to/folder
+```
+
+## Changing the course
+
+Edit the `A_LATLON` / `B_LATLON` constants in `straightest.py` and the `BASELINE`
+block near the top of the `<script>` in `index.html` (both come from the KML LineString).
 
 ## How the score is computed
 
-For each track: project lat/lon to local metres, trim stationary GPS jitter at the start/end,
-fit a **total-least-squares (principal-axis) line**, then take the **average perpendicular
-distance** of all points from that line. `rms` and `worst` are shown as tie-breakers.
-Each paddler's **best** run is kept.
+Project lat/lon to local metres → for each track point compute its distance *along* the
+A→B line and its *perpendicular* offset → keep the slice between the start-gate and
+finish-gate points → average the perpendicular offsets. `rms`, `worst` and `covered %`
+are shown alongside as tie-breakers / sanity checks.

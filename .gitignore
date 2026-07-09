@@ -1,0 +1,4 @@
+scores.json
+_test/
+__pycache__/
+*.pyc

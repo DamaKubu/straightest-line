@@ -31,13 +31,14 @@
   .clear { background:#2b333d; color:var(--text); font-size:14px; padding:12px; margin-top:12px; }
   .hint { color:var(--muted); font-size:13px; text-align:center; line-height:1.5; margin-top:8px; }
   .err { color:var(--bad); font-size:14px; text-align:center; margin-top:6px; }
+  .warnmsg { color:var(--warn); font-size:13px; text-align:center; margin-top:6px; }
   .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
 </style>
 </head>
 <body>
 <h1>🛶 Straightest Line</h1>
-<div class="tag">Paddle ~1 km. Straightest track wins.</div>
+<div class="tag">Paddle the marked line. Closest to it wins.</div>
 <div class="mode" id="mode"></div>
 
 <div class="card">
@@ -52,8 +53,9 @@
 <div class="card" id="resultCard" style="display:none">
   <div class="result">
     <div class="big" id="scoreBig">–</div>
-    <div class="sub">average meters off your best-fit straight line — lower is better</div>
+    <div class="sub">average metres off the course line — lower is better</div>
     <div class="sub" id="scoreDetail" style="margin-top:8px"></div>
+    <div class="warnmsg" id="scoreWarn"></div>
   </div>
 </div>
 
@@ -66,63 +68,35 @@
 </div>
 
 <div class="hint">
-  Tip: put your phone flat on the deck, screen up, clear view of the sky, and start
-  recording <em>before</em> you push off. Any app works as long as it exports a <b>.gpx</b> file.
+  Record your paddle with any app that exports a <b>.gpx</b> file, then upload it here.
+  Only the part of your track along the course line is scored — the approach and run-out are ignored.
 </div>
 
-<!-- ================================================================= -->
-<!--  FIREBASE CONFIG — paste yours between the quotes to enable the    -->
-<!--  shared live leaderboard. Leave as-is for single-device mode.      -->
-<!-- ================================================================= -->
-<script type="module">
-const firebaseConfig = {
-  apiKey:            "PASTE_API_KEY",
-  authDomain:        "PASTE_AUTH_DOMAIN",
-  projectId:         "PASTE_PROJECT_ID",
-  storageBucket:     "PASTE_STORAGE_BUCKET",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId:             "PASTE_APP_ID"
+<script>
+// ===================================================================
+//  COURSE LINE  (from tiesė.kml — "TIESĖ PLAUKIAMA LYGIAI")
+//  A = start end,  B = finish end.  Edit here if the course changes.
+// ===================================================================
+const BASELINE = {
+  a: { lat: 55.5749925, lon: 25.9849632 },
+  b: { lat: 55.5891772, lon: 26.0485279 }
 };
-const CLOUD = !firebaseConfig.apiKey.startsWith("PASTE");
 
 const $ = id => document.getElementById(id);
 
-// ---------- geometry ----------
-function haversine(a,b){
-  const R=6371000, toR=x=>x*Math.PI/180;
-  const dLat=toR(b.lat-a.lat), dLon=toR(b.lon-a.lon);
-  const s=Math.sin(dLat/2)**2 + Math.cos(toR(a.lat))*Math.cos(toR(b.lat))*Math.sin(dLon/2)**2;
-  return 2*R*Math.asin(Math.sqrt(s));
-}
-function pathLength(p){ let d=0; for(let i=1;i<p.length;i++) d+=haversine(p[i-1],p[i]); return d; }
-function toMeters(p){
-  const lat0=p.reduce((s,x)=>s+x.lat,0)/p.length;
-  const lon0=p.reduce((s,x)=>s+x.lon,0)/p.length;
-  const mLat=111320, mLon=111320*Math.cos(lat0*Math.PI/180);
-  return p.map(x=>({x:(x.lon-lon0)*mLon, y:(x.lat-lat0)*mLat}));
-}
-function dist2(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
-function trimEnds(xy, thr){
-  if(xy.length<3) return xy;
-  let i=0; while(i<xy.length-1 && dist2(xy[i],xy[0])<thr) i++;
-  let j=xy.length-1; while(j>0 && dist2(xy[j],xy[xy.length-1])<thr) j--;
-  const t=xy.slice(i,j+1);
-  return t.length>=2 ? t : xy;
-}
-function score(xy){
-  const n=xy.length;
-  const cx=xy.reduce((s,p)=>s+p.x,0)/n, cy=xy.reduce((s,p)=>s+p.y,0)/n;
-  let sxx=0,syy=0,sxy=0;
-  for(const p of xy){ const dx=p.x-cx, dy=p.y-cy; sxx+=dx*dx; syy+=dy*dy; sxy+=dx*dy; }
-  const th=0.5*Math.atan2(2*sxy, sxx-syy);
-  const dx=Math.cos(th), dy=Math.sin(th);
-  let sum=0,sq=0,mx=0;
-  for(const p of xy){
-    const perp=Math.abs((p.x-cx)*(-dy)+(p.y-cy)*dx);
-    sum+=perp; sq+=perp*perp; if(perp>mx) mx=perp;
-  }
-  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx };
-}
+// ---------- projection to local metres (common origin = baseline midpoint) ----------
+const ORIGIN = { lat:(BASELINE.a.lat+BASELINE.b.lat)/2, lon:(BASELINE.a.lon+BASELINE.b.lon)/2 };
+const M_LAT = 111320, M_LON = 111320*Math.cos(ORIGIN.lat*Math.PI/180);
+const proj = pt => ({ x:(pt.lon-ORIGIN.lon)*M_LON, y:(pt.lat-ORIGIN.lat)*M_LAT });
+
+const A = proj(BASELINE.a), B = proj(BASELINE.b);
+const ABx = B.x-A.x, ABy = B.y-A.y, L = Math.hypot(ABx,ABy);
+const UX = ABx/L, UY = ABy/L;                 // unit vector along the course
+
+// along-course distance from A (metres) and perpendicular offset (metres)
+const along = p => (p.x-A.x)*UX + (p.y-A.y)*UY;
+const perp  = p => Math.abs((p.x-A.x)*(-UY) + (p.y-A.y)*UX);
+
 function parseGpx(text){
   const doc=new DOMParser().parseFromString(text,'application/xml');
   if(doc.getElementsByTagName('parsererror').length) throw new Error('not valid GPX/XML');
@@ -134,21 +108,25 @@ function parseGpx(text){
   }
   return p;
 }
-const keyOf = name => name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'') || 'x';
 
-// ---------- storage backends ----------
-let store;
-function localBackend(){
-  const load=()=>{ try{ return JSON.parse(localStorage.getItem('board')||'[]'); }catch(e){ return []; } };
-  return {
-    async submit(r){
-      const b=load(); const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
-      if(i>=0){ if(r.avg<b[i].avg) b[i]=r; } else b.push(r);
-      localStorage.setItem('board', JSON.stringify(b)); render(b);
-    },
-    watch(){ render(load()); },
-    async clear(){ localStorage.removeItem('board'); render([]); }
-  };
+// Smart start/end removal: keep the track slice between the point nearest the
+// START gate (along≈0) and the point nearest the FINISH gate (along≈L).
+function scoreTrack(rawPts){
+  const P = rawPts.map(proj);
+  const t = P.map(along);
+  let si=0, fi=0, sb=Infinity, fb=Infinity;
+  for(let i=0;i<t.length;i++){
+    const ds=Math.abs(t[i]);      if(ds<sb){ sb=ds; si=i; }
+    const df=Math.abs(t[i]-L);    if(df<fb){ fb=df; fi=i; }
+  }
+  let lo=Math.min(si,fi), hi=Math.max(si,fi);       // handle either paddling direction
+  const seg = P.slice(lo, hi+1);
+  if(seg.length<2) throw new Error('could not find your run along the course line');
+  let sum=0, sq=0, mx=0;
+  for(const p of seg){ const d=perp(p); sum+=d; sq+=d*d; if(d>mx) mx=d; }
+  const n=seg.length;
+  const coverage = Math.abs(t[hi]-t[lo])/L;         // fraction of the line actually paddled
+  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx, coverage };
 }
 
 // ---------- rendering ----------
@@ -159,41 +137,43 @@ function render(rows){
     `<td class="score">${r.avg.toFixed(2)} m</td></tr>`).join('')
     || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
 }
-function escapeHtml(s){ return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-// ---------- init backend ----------
+// ---------- backend: shared server (same origin) with localStorage fallback ----------
+let store, SHARED=false;
+async function api(method, path, body){
+  const r=await fetch(path,{method,headers:{'Content-Type':'application/json'},
+                            body:body?JSON.stringify(body):undefined});
+  if(!r.ok) throw new Error('server '+r.status);
+  return r.json();
+}
+function localBackend(){
+  const load=()=>{ try{ return JSON.parse(localStorage.getItem('board')||'[]'); }catch(e){ return []; } };
+  return {
+    async submit(r){ const b=load(); const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
+      if(i>=0){ if(r.avg<b[i].avg) b[i]=r; } else b.push(r); localStorage.setItem('board',JSON.stringify(b)); render(b); },
+    watch(){ render(load()); },
+    async clear(){ localStorage.removeItem('board'); render([]); }
+  };
+}
+function serverBackend(){
+  return {
+    async submit(r){ render(await api('POST','scores',r)); },
+    watch(){ const tick=async()=>{ try{ render(await api('GET','scores')); }catch(e){} };
+             tick(); setInterval(tick,3000); },
+    async clear(){ render(await api('POST','clear',{})); }
+  };
+}
 async function initBackend(){
-  if(CLOUD){
-    try{
-      const { initializeApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
-      const { getFirestore, collection, doc, setDoc, getDoc, onSnapshot, deleteDoc, getDocs } =
-        await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js");
-      const app=initializeApp(firebaseConfig);
-      const db=getFirestore(app);
-      const col=collection(db,'runs');
-      store={
-        async submit(r){
-          const ref=doc(col, keyOf(r.name));
-          const cur=await getDoc(ref);
-          if(!cur.exists() || r.avg < cur.data().avg) await setDoc(ref, r);
-        },
-        watch(){ onSnapshot(col, snap=>render(snap.docs.map(d=>d.data()))); },
-        async clear(){ const s=await getDocs(col); for(const d of s.docs) await deleteDoc(d.ref); }
-      };
-      $('mode').innerHTML='<span class="dot" style="background:var(--good)"></span>Shared live leaderboard — everyone sees the same list';
-      return;
-    }catch(e){
-      $('mode').innerHTML='<span class="dot" style="background:var(--bad)"></span>Cloud failed ('+e.message+') — using this device only';
-    }
-  } else {
-    $('mode').innerHTML='<span class="dot" style="background:var(--warn)"></span>This device only (add Firebase config for a shared leaderboard)';
-  }
-  store=localBackend();
+  try{ await api('GET','scores'); store=serverBackend(); SHARED=true;
+       $('mode').innerHTML='<span class="dot" style="background:var(--good)"></span>Shared live leaderboard'; }
+  catch(e){ store=localBackend();
+       $('mode').innerHTML='<span class="dot" style="background:var(--warn)"></span>This device only (not connected to the leaderboard server)'; }
 }
 
 // ---------- action ----------
 $('scoreBtn').onclick=async ()=>{
-  $('err').textContent='';
+  $('err').textContent=''; $('scoreWarn').textContent='';
   const name=$('name').value.trim();
   const file=$('gpx').files[0];
   if(!name){ $('err').textContent='Please enter your name.'; return; }
@@ -202,20 +182,18 @@ $('scoreBtn').onclick=async ()=>{
   try{
     const pts=parseGpx(await file.text());
     if(pts.length<5){ $('err').textContent='That GPX has too few track points.'; return; }
-    const s=score(trimEnds(toMeters(pts),8));
-    const len=pathLength(pts);
+    const s=scoreTrack(pts);
     $('resultCard').style.display='block';
     $('scoreBig').textContent=s.avg.toFixed(2)+' m';
-    $('scoreDetail').innerHTML=
-      `rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · length ${Math.round(len)} m`;
-    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, len:Math.round(len) });
-  }catch(e){ $('err').textContent='Could not read that file: '+e.message; }
+    $('scoreDetail').innerHTML=`rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · covered ${(s.coverage*100).toFixed(0)}% of the line`;
+    if(s.coverage<0.9) $('scoreWarn').textContent='⚠ Your track covers less than 90% of the course line — did you paddle the whole thing?';
+    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage });
+  }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
   finally{ $('scoreBtn').disabled=false; }
 };
 $('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard?')) await store.clear(); };
 
-await initBackend();
-store.watch();
+initBackend().then(()=>store.watch());
 </script>
 </body>
 </html>
