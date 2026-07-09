@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Straightest Line — Kayak Contest</title>
+<style>
+  :root { --bg:#0e1116; --card:#1a1f27; --accent:#4cc2ff; --good:#37d67a;
+          --warn:#f5a623; --bad:#ff5c5c; --text:#e6edf3; --muted:#8b98a5; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+         background:var(--bg); color:var(--text); padding:16px; max-width:520px; margin:0 auto; }
+  h1 { font-size:22px; margin:6px 0 4px; text-align:center; }
+  .tag { text-align:center; color:var(--muted); font-size:14px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:14px; padding:16px; margin-bottom:14px; }
+  label { display:block; font-size:14px; color:var(--muted); margin-bottom:6px; }
+  input[type=text] { width:100%; padding:14px; font-size:18px; border-radius:10px;
+          border:1px solid #2b333d; background:#0e1116; color:var(--text); margin-bottom:14px; }
+  input[type=file] { width:100%; font-size:15px; color:var(--text); margin-bottom:14px; }
+  button { width:100%; padding:18px; font-size:20px; font-weight:700;
+           border:none; border-radius:14px; background:var(--good); color:#08131b; }
+  button:disabled { opacity:.4; }
+  .result { text-align:center; padding:6px 0; }
+  .result .big { font-size:46px; font-weight:800; color:var(--accent); }
+  .result .sub { color:var(--muted); font-size:14px; }
+  table { width:100%; border-collapse:collapse; }
+  th,td { padding:9px 6px; text-align:left; font-size:16px; border-bottom:1px solid #232b34; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.5px; }
+  td.score { font-weight:700; color:var(--accent); text-align:right; }
+  tr.win td { color:var(--good); font-weight:700; }
+  .clear { background:#2b333d; color:var(--text); font-size:14px; padding:12px; margin-top:12px; }
+  .hint { color:var(--muted); font-size:13px; text-align:center; line-height:1.5; margin-top:8px; }
+  .err { color:var(--bad); font-size:14px; text-align:center; margin-top:6px; }
+</style>
+</head>
+<body>
+<h1>🛶 Straightest Line</h1>
+<div class="tag">Paddle ~1 km. Straightest track wins.</div>
+
+<div class="card">
+  <label for="name">Your name</label>
+  <input id="name" type="text" placeholder="e.g. Danielius" autocomplete="off">
+  <label for="gpx">Your GPX file (exported from Strava or any tracking app)</label>
+  <input id="gpx" type="file" accept=".gpx,application/gpx+xml">
+  <button id="scoreBtn">Score my run</button>
+  <div class="err" id="err"></div>
+</div>
+
+<div class="card" id="resultCard" style="display:none">
+  <div class="result">
+    <div class="big" id="scoreBig">–</div>
+    <div class="sub">average meters off your best-fit straight line — lower is better</div>
+    <div class="sub" id="scoreDetail" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<div class="card">
+  <table>
+    <thead><tr><th>#</th><th>Paddler</th><th style="text-align:right">Avg off</th></tr></thead>
+    <tbody id="board"></tbody>
+  </table>
+  <button class="clear" id="clearBtn">Clear leaderboard</button>
+</div>
+
+<div class="hint">
+  Tip: put your phone flat on the deck, screen up, clear view of the sky, and start
+  recording <em>before</em> you push off. Any app works as long as it exports a <b>.gpx</b> file.
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// ---- geometry ----
+function haversine(a,b){
+  const R=6371000, toR=x=>x*Math.PI/180;
+  const dLat=toR(b.lat-a.lat), dLon=toR(b.lon-a.lon);
+  const s=Math.sin(dLat/2)**2 + Math.cos(toR(a.lat))*Math.cos(toR(b.lat))*Math.sin(dLon/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+function pathLength(p){ let d=0; for(let i=1;i<p.length;i++) d+=haversine(p[i-1],p[i]); return d; }
+function toMeters(p){
+  const lat0=p.reduce((s,x)=>s+x.lat,0)/p.length;
+  const lon0=p.reduce((s,x)=>s+x.lon,0)/p.length;
+  const mLat=111320, mLon=111320*Math.cos(lat0*Math.PI/180);
+  return p.map(x=>({x:(x.lon-lon0)*mLon, y:(x.lat-lat0)*mLat}));
+}
+function dist2(a,b){ return Math.hypot(a.x-b.x,a.y-b.y); }
+function trimEnds(xy, thr){
+  if(xy.length<3) return xy;
+  let i=0; while(i<xy.length-1 && dist2(xy[i],xy[0])<thr) i++;
+  let j=xy.length-1; while(j>0 && dist2(xy[j],xy[xy.length-1])<thr) j--;
+  const t=xy.slice(i,j+1);
+  return t.length>=2 ? t : xy;
+}
+function score(xy){
+  const n=xy.length;
+  const cx=xy.reduce((s,p)=>s+p.x,0)/n, cy=xy.reduce((s,p)=>s+p.y,0)/n;
+  let sxx=0,syy=0,sxy=0;
+  for(const p of xy){ const dx=p.x-cx, dy=p.y-cy; sxx+=dx*dx; syy+=dy*dy; sxy+=dx*dy; }
+  const th=0.5*Math.atan2(2*sxy, sxx-syy);
+  const dx=Math.cos(th), dy=Math.sin(th);
+  let sum=0,sq=0,mx=0;
+  for(const p of xy){
+    const perp=Math.abs((p.x-cx)*(-dy)+(p.y-cy)*dx);
+    sum+=perp; sq+=perp*perp; if(perp>mx) mx=perp;
+  }
+  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx };
+}
+function parseGpx(text){
+  const doc=new DOMParser().parseFromString(text,'application/xml');
+  if(doc.getElementsByTagName('parsererror').length) throw new Error('not valid GPX/XML');
+  const nodes=doc.getElementsByTagName('trkpt');
+  const p=[];
+  for(const n of nodes){
+    const lat=parseFloat(n.getAttribute('lat')), lon=parseFloat(n.getAttribute('lon'));
+    if(!isNaN(lat)&&!isNaN(lon)) p.push({lat,lon});
+  }
+  return p;
+}
+
+// ---- leaderboard (this device only) ----
+function load(){ try{ return JSON.parse(localStorage.getItem('board')||'[]'); }catch(e){ return []; } }
+function saveAll(b){ localStorage.setItem('board', JSON.stringify(b)); }
+function upsert(r){
+  const b=load();
+  const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
+  if(i>=0){ if(r.avg < b[i].avg) b[i]=r; }   // keep each paddler's best run
+  else b.push(r);
+  saveAll(b);
+}
+function render(){
+  const b=load().sort((a,c)=>a.avg-c.avg);
+  $('board').innerHTML = b.map((r,i)=>
+    `<tr class="${i===0?'win':''}"><td>${i+1}</td><td>${r.name}</td>`+
+    `<td class="score">${r.avg.toFixed(2)} m</td></tr>`).join('')
+    || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
+}
+
+// ---- action ----
+$('scoreBtn').onclick=async ()=>{
+  $('err').textContent='';
+  const name=$('name').value.trim();
+  const file=$('gpx').files[0];
+  if(!name){ $('err').textContent='Please enter your name.'; return; }
+  if(!file){ $('err').textContent='Please choose your GPX file.'; return; }
+  try{
+    const pts=parseGpx(await file.text());
+    if(pts.length<5){ $('err').textContent='That GPX has too few track points.'; return; }
+    const s=score(trimEnds(toMeters(pts),8));
+    const len=pathLength(pts);
+    $('resultCard').style.display='block';
+    $('scoreBig').textContent=s.avg.toFixed(2)+' m';
+    $('scoreDetail').innerHTML=
+      `rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · length ${Math.round(len)} m`;
+    upsert({name, avg:s.avg, rms:s.rms, max:s.max, len});
+    render();
+  }catch(e){ $('err').textContent='Could not read that file: '+e.message; }
+};
+$('clearBtn').onclick=()=>{ if(confirm('Clear the whole leaderboard?')){ localStorage.removeItem('board'); render(); } };
+render();
+</script>
+</body>
+</html>
