@@ -50,12 +50,19 @@ def upsert(rec):
         name = str(rec.get("name", "")).strip()
         if not name:
             return rows
+        track = rec.get("track") or []
+        if isinstance(track, list):
+            track = [{"lat": float(p["lat"]), "lon": float(p["lon"])}
+                     for p in track[:400] if "lat" in p and "lon" in p]
+        else:
+            track = []
         clean = {
             "name": name,
             "avg": float(rec["avg"]),
             "rms": float(rec.get("rms", 0)),
             "max": float(rec.get("max", 0)),
             "coverage": float(rec.get("coverage", 0)),
+            "track": track,
         }
         i = next((k for k, r in enumerate(rows)
                   if r["name"].lower() == name.lower()), None)

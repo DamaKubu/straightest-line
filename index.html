@@ -4,8 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Straightest Line — Kayak Contest</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root { --bg:#0e1116; --card:#1a1f27; --accent:#4cc2ff; --good:#37d67a;
           --warn:#f5a623; --bad:#ff5c5c; --text:#e6edf3; --muted:#8b98a5; }
@@ -18,7 +16,12 @@
   label { display:block; font-size:14px; color:var(--muted); margin-bottom:6px; }
   input[type=text] { width:100%; padding:14px; font-size:18px; border-radius:10px;
           border:1px solid #2b333d; background:#0e1116; color:var(--text); margin-bottom:14px; }
-  input[type=file] { width:100%; font-size:15px; color:var(--text); margin-bottom:14px; }
+  .drop { border:2px dashed #3a444f; border-radius:12px;
+          padding:22px 14px; text-align:center; margin-bottom:14px; cursor:pointer;
+          background:#0e1116; transition:border-color .15s, background .15s; }
+  .drop.over { border-color:var(--good); background:#132019; }
+  .drop .big { font-size:17px; font-weight:600; }
+  .drop .sub { font-size:13px; color:var(--muted); }
   button { width:100%; padding:18px; font-size:20px; font-weight:700;
            border:none; border-radius:14px; background:var(--good); color:#08131b; }
   button:disabled { opacity:.4; }
@@ -36,9 +39,9 @@
   .warnmsg { color:var(--warn); font-size:13px; text-align:center; margin-top:6px; }
   .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
-  #map { height:230px; border-radius:12px; background:#0e1116; }
+  #map { height:300px; border-radius:12px; background:#0e1116; }
   .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
-  .legend b { color:var(--accent); } .legend .t { color:var(--warn); }
+  .cdot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:7px; vertical-align:middle; }
 </style>
 </head>
 <body>
@@ -48,14 +51,23 @@
 
 <div class="card">
   <div id="map"></div>
-  <div class="legend"><b>▬ ideal course line</b> &nbsp;·&nbsp; <span class="t">▬ your track</span> (shown after upload)</div>
+  <div class="legend">Straightened view — white dashed = ideal line · ↔ distance along course · ↕ metres off the line (exaggerated). Each paddler has their own colour, matching the leaderboard.</div>
 </div>
+
+<details class="card">
+  <summary style="cursor:pointer;color:var(--muted);font-size:14px">🗺️ Official course map (Google) — needs the My Map shared publicly</summary>
+  <iframe src="https://www.google.com/maps/d/embed?mid=1mEGuDQf7deYDtFCfAw6OI-YlnDuiglw&ehbc=2E312F"
+          style="width:100%;height:340px;border:0;border-radius:10px;margin-top:10px" loading="lazy"></iframe>
+</details>
 
 <div class="card">
   <label for="name">Your name</label>
   <input id="name" type="text" placeholder="e.g. Danielius" autocomplete="off">
-  <label for="gpx">Your GPX file (exported from Strava or any tracking app)</label>
-  <input id="gpx" type="file" accept=".gpx,application/gpx+xml">
+  <label>Your GPX file (exported from Strava or any tracking app)</label>
+  <div id="drop" class="drop">
+    <input id="gpx" type="file" accept=".gpx,application/gpx+xml,application/octet-stream" hidden>
+    <div id="dropText"><div class="big">📂 Tap to choose your GPX</div><div class="sub">or drag &amp; drop the file here</div></div>
+  </div>
   <button id="scoreBtn">Score my run</button>
   <div class="err" id="err"></div>
 </div>
@@ -140,33 +152,65 @@ function scoreTrack(rawPts){
 }
 
 // ---------- mini map (Leaflet) ----------
-let map=null, trackLayer=null;
-function initMap(){
-  const el=$('map');
-  if(typeof L==='undefined'){ el.parentElement.style.display='none'; return; }
-  map=L.map(el,{attributionControl:false});
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
-  const a=[BASELINE.a.lat,BASELINE.a.lon], b=[BASELINE.b.lat,BASELINE.b.lon];
-  L.polyline([a,b],{color:'#4cc2ff',weight:3}).addTo(map);
-  L.circleMarker(a,{radius:6,color:'#37d67a',fillColor:'#37d67a',fillOpacity:1}).addTo(map).bindTooltip('Start');
-  L.circleMarker(b,{radius:6,color:'#ff5c5c',fillColor:'#ff5c5c',fillOpacity:1}).addTo(map).bindTooltip('Finish');
-  map.fitBounds([a,b],{padding:[25,25]});
-  setTimeout(()=>map.invalidateSize(),200);
+const PALETTE=['#4cc2ff','#37d67a','#f5a623','#ff5c5c','#b980ff','#ff8fcf',
+               '#3ee0c8','#ffd24c','#7aa2ff','#9be15d','#ff9d4c','#e05c8a'];
+const colorFor = i => PALETTE[i % PALETTE.length];
+
+const perpSigned = p => (p.x-A.x)*(-UY) + (p.y-A.y)*UX;   // signed offset (left/right of line)
+
+// Straightened comparison chart: X = distance along the course, Y = metres off
+// the ideal line (cross-track exaggerated). Pure SVG — no tiles, no library, no auth.
+let lastRows=[];
+function renderPlot(rows){
+  lastRows=rows;
+  const host=$('map'); if(!host) return;
+  const W=Math.max(320, host.clientWidth||600), H=300;
+  const padL=48, padR=14, padT=16, padB=32;
+  const series=rows.map((r,i)=>({ name:r.name, avg:r.avg, color:colorFor(i),
+      pts:(r.track||[]).map(p=>{ const q=proj(p); return {a:along(q), d:perpSigned(q)}; }) }))
+      .filter(s=>s.pts.length);
+  let yMax=8;
+  series.forEach(s=>s.pts.forEach(p=>{ const ad=Math.abs(p.d); if(ad>yMax) yMax=ad; }));
+  yMax*=1.15;
+  const xOf=a=> padL + Math.max(0,Math.min(1,a/L))*(W-padL-padR);
+  const yOf=d=> padT + ((yMax-d)/(2*yMax))*(H-padT-padB);
+  const y0=yOf(0);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px">`;
+  s+=`<rect x="0" y="0" width="${W}" height="${H}" fill="#0e1116"/>`;
+  for(let km=0; km*1000<=L+1; km++){ const x=xOf(km*1000);
+    s+=`<line x1="${x}" y1="${padT}" x2="${x}" y2="${H-padB}" stroke="#232b34"/>`;
+    s+=`<text x="${x}" y="${H-padB+16}" fill="#8b98a5" font-size="11" text-anchor="middle">${km} km</text>`; }
+  s+=`<line x1="${xOf(0)}" y1="${y0}" x2="${xOf(L)}" y2="${y0}" stroke="#fff" stroke-width="2" stroke-dasharray="7,7"/>`;
+  s+=`<text x="6" y="${padT+10}" fill="#8b98a5" font-size="11">+${Math.round(yMax)}m</text>`;
+  s+=`<text x="6" y="${y0+4}" fill="#c9d3dd" font-size="11">0</text>`;
+  s+=`<text x="6" y="${H-padB}" fill="#8b98a5" font-size="11">-${Math.round(yMax)}m</text>`;
+  s+=`<circle cx="${xOf(0)}" cy="${y0}" r="4" fill="#37d67a"/><circle cx="${xOf(L)}" cy="${y0}" r="4" fill="#ff5c5c"/>`;
+  series.forEach(sr=>{
+    const pl=sr.pts.map(p=>`${xOf(p.a).toFixed(1)},${yOf(p.d).toFixed(1)}`).join(' ');
+    s+=`<polyline points="${pl}" fill="none" stroke="${sr.color}" stroke-width="2.5" stroke-opacity="0.92">`+
+       `<title>${escapeHtml(sr.name)} — ${sr.avg.toFixed(2)} m</title></polyline>`;
+  });
+  s+=`</svg>`;
+  host.innerHTML=s;
 }
-function drawTrack(latlons){
-  if(!map||!latlons.length) return;
-  if(trackLayer) map.removeLayer(trackLayer);
-  trackLayer=L.polyline(latlons.map(p=>[p.lat,p.lon]),{color:'#f5a623',weight:2}).addTo(map);
-  map.fitBounds(trackLayer.getBounds(),{padding:[20,20]});
+// keep only ~150 points so track shapes travel cheaply to the server / storage
+function downsample(pts, max=150){
+  if(pts.length<=max) return pts.map(p=>({lat:+p.lat.toFixed(6),lon:+p.lon.toFixed(6)}));
+  const step=pts.length/max, out=[];
+  for(let i=0;i<pts.length;i+=step) out.push(pts[Math.floor(i)]);
+  out.push(pts[pts.length-1]);
+  return out.map(p=>({lat:+p.lat.toFixed(6),lon:+p.lon.toFixed(6)}));
 }
 
 // ---------- rendering ----------
 function render(rows){
   const b=[...rows].sort((a,c)=>a.avg-c.avg);
   $('board').innerHTML = b.map((r,i)=>
-    `<tr class="${i===0?'win':''}"><td>${i+1}</td><td>${escapeHtml(r.name)}</td>`+
+    `<tr class="${i===0?'win':''}"><td>${i+1}</td>`+
+    `<td><span class="cdot" style="background:${colorFor(i)}"></span>${escapeHtml(r.name)}</td>`+
     `<td class="score">${r.avg.toFixed(2)} m</td></tr>`).join('')
     || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
+  renderPlot(b);
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -202,11 +246,28 @@ async function initBackend(){
        $('mode').innerHTML='<span class="dot" style="background:var(--warn)"></span>This device only (not connected to the leaderboard server)'; }
 }
 
+// ---------- file picker + drag & drop ----------
+let chosenFile=null;
+const drop=$('drop'), gpx=$('gpx');
+function setFile(f){
+  chosenFile=f;
+  $('dropText').innerHTML = f
+    ? `<div class="big">✅ ${escapeHtml(f.name)}</div><div class="sub">tap to choose a different file</div>`
+    : `<div class="big">📂 Tap to choose your GPX</div><div class="sub">or drag &amp; drop the file here</div>`;
+}
+drop.addEventListener('click', ()=>gpx.click());
+gpx.addEventListener('change', ()=>{ if(gpx.files[0]) setFile(gpx.files[0]); });
+// drag & drop anywhere on the page (desktop)
+['dragenter','dragover'].forEach(ev=>window.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.add('over'); }));
+window.addEventListener('dragleave', e=>{ if(!e.relatedTarget) drop.classList.remove('over'); });
+window.addEventListener('drop', e=>{ e.preventDefault(); drop.classList.remove('over');
+  const f=e.dataTransfer && e.dataTransfer.files[0]; if(f) setFile(f); });
+
 // ---------- action ----------
 $('scoreBtn').onclick=async ()=>{
   $('err').textContent=''; $('scoreWarn').textContent='';
   const name=$('name').value.trim();
-  const file=$('gpx').files[0];
+  const file=chosenFile;
   if(!name){ $('err').textContent='Please enter your name.'; return; }
   if(!file){ $('err').textContent='Please choose your GPX file.'; return; }
   $('scoreBtn').disabled=true;
@@ -218,14 +279,14 @@ $('scoreBtn').onclick=async ()=>{
     $('scoreBig').textContent=s.avg.toFixed(2)+' m';
     $('scoreDetail').innerHTML=`rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · covered ${(s.coverage*100).toFixed(0)}% of the line`;
     if(s.coverage<0.9) $('scoreWarn').textContent='⚠ Your track covers less than 90% of the course line — did you paddle the whole thing?';
-    drawTrack(s.track);
-    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage });
+    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage, track:downsample(s.track) });
   }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
   finally{ $('scoreBtn').disabled=false; }
 };
 $('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard?')) await store.clear(); };
 
-initMap();
+renderPlot([]);
+window.addEventListener('resize', ()=>renderPlot(lastRows));
 initBackend().then(()=>store.watch());
 </script>
 </body>
