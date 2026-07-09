@@ -151,7 +151,7 @@ function scoreTrack(rawPts){
   return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx, coverage, track:rawPts.slice(lo,hi+1) };
 }
 
-// ---------- mini map (Leaflet) ----------
+// ---------- comparison chart colours ----------
 const PALETTE=['#4cc2ff','#37d67a','#f5a623','#ff5c5c','#b980ff','#ff8fcf',
                '#3ee0c8','#ffd24c','#7aa2ff','#9be15d','#ff9d4c','#e05c8a'];
 const colorFor = i => PALETTE[i % PALETTE.length];
