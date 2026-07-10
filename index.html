@@ -324,20 +324,24 @@ const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt
 //  (These sit in a public page on purpose — the Access Key can only
 //   read/update this one bin, nothing else on your account.)
 // ===================================================================
-const JSONBIN = { binId:'REPLACE_BIN_ID', key:'REPLACE_ACCESS_KEY' };
+const JSONBIN = { binId:'6a5091d4f5f4af5e297b3ccd',
+                  key:'$2a$10$beWYnhmzIDMfAmRgjuuYKO3j4ELxgVRAqgEMTbJo8Hppwc903hwXy' };
 const jbConfigured = () => JSONBIN.binId && !/^REPLACE/.test(JSONBIN.binId);
 async function jbGet(){
   const r=await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN.binId}/latest`,
     { headers:{ 'X-Access-Key':JSONBIN.key, 'X-Bin-Meta':'false' } });
   if(!r.ok) throw new Error('cloud '+r.status);
   const j=await r.json();
-  const rec = Array.isArray(j) ? j : (j.record || []);
-  return Array.isArray(rec) ? rec : [];
+  // stored as { scores:[...] } (JSONBin refuses a bare empty array), but tolerate
+  // a legacy bare-array bin too.
+  if(Array.isArray(j)) return j;
+  if(j && Array.isArray(j.scores)) return j.scores;
+  return [];
 }
 async function jbPut(rows){
   const r=await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN.binId}`,
     { method:'PUT', headers:{ 'X-Access-Key':JSONBIN.key, 'Content-Type':'application/json' },
-      body:JSON.stringify(rows) });
+      body:JSON.stringify({ scores:rows }) });   // wrap so it's never "blank"
   if(!r.ok) throw new Error('cloud '+r.status);
   return rows;
 }
