@@ -46,6 +46,7 @@
   #map { height:300px; border-radius:12px; background:#0e1116; }
   #minimap { height:460px; border-radius:12px; background:#0e1116; }
   #firemap { height:420px; border-radius:12px; background:#0e1116; }
+  #compareMap { height:360px; border-radius:12px; background:#0e1116; }
   .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
   .cdot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:7px; vertical-align:middle; }
   .toggles { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
@@ -152,6 +153,11 @@
       for fun. <b>The contest is still decided by lowest “avg off”.</b>
     </div>
   </div>
+  <div class="card">
+    <div id="compareMap"></div>
+    <div class="legend">All full routes overlaid — each paddler's whole ~20 km GPX in their colour, white dashed = the scored line. © OpenStreetMap.</div>
+  </div>
+  <div id="rankings"></div>
   <div id="analyses"></div>
 </div>
 
@@ -262,38 +268,44 @@ function parseGpx(text){
   const p=[];
   for(const n of nodes){
     const lat=parseFloat(n.getAttribute('lat')), lon=parseFloat(n.getAttribute('lon'));
-    if(!isNaN(lat)&&!isNaN(lon)) p.push({lat,lon});
+    if(!isNaN(lat)&&!isNaN(lon)){
+      const e=n.getElementsByTagName('ele')[0];
+      p.push({lat,lon,ele:e?parseFloat(e.textContent):NaN});
+    }
   }
   return p;
 }
 
-// Smart start/end removal: keep the track slice between the point nearest the
-// START gate (along≈0) and the point nearest the FINISH gate (along≈L).
-function scoreTrack(rawPts){
-  const P = rawPts.map(proj);
-  const t = P.map(along);
-  const n = t.length;
-  // START gate: the track point closest to the A end (along ≈ 0).
+// Smart start/end removal: find the slice between the point nearest the START
+// gate (along≈0) and the FIRST point that reaches the FINISH gate (along≈L).
+// Scanning outward for the finish (not global nearest-to-L) stops a long/looping
+// full route from matching a far-away point that shares the same along position.
+function scoringSlice(P, t){
+  const n=t.length;
   let si=0, sb=Infinity;
   for(let i=0;i<n;i++){ const d=Math.abs(t[i]); if(d<sb){ sb=d; si=i; } }
-  // FINISH gate: the FIRST point, scanning outward from the start, that reaches
-  // the B end. Scanning outward (instead of global nearest-to-L) stops a track
-  // that is much longer than the line — or loops back — from matching a far-away
-  // point that merely shares the same along-course position.
-  const TH = L*0.98;
-  let fi=-1;
-  for(let i=si+1;i<n;i++){ if(t[i]>=TH){ fi=i; break; } }        // paddled A → B
-  if(fi<0) for(let i=si-1;i>=0;i--){ if(t[i]>=TH){ fi=i; break; } }  // paddled B → A
-  if(fi<0){ let fb=Infinity;                                    // never reached B: nearest to L
-    for(let i=0;i<n;i++){ const d=Math.abs(t[i]-L); if(d<fb){ fb=d; fi=i; } } }
-  let lo=Math.min(si,fi), hi=Math.max(si,fi);
+  const TH=L*0.98; let fi=-1;
+  for(let i=si+1;i<n;i++){ if(t[i]>=TH){ fi=i; break; } }        // A → B
+  if(fi<0) for(let i=si-1;i>=0;i--){ if(t[i]>=TH){ fi=i; break; } }  // B → A
+  if(fi<0){ let fb=Infinity; for(let i=0;i<n;i++){ const d=Math.abs(t[i]-L); if(d<fb){ fb=d; fi=i; } } }
+  return [Math.min(si,fi), Math.max(si,fi)];
+}
+function scoreTrack(rawPts){
+  const P = rawPts.map(proj), t = P.map(along);
+  const [lo,hi] = scoringSlice(P,t);
   const seg = P.slice(lo, hi+1);
   if(seg.length<2) throw new Error('could not find your run along the course line');
   let sum=0, sq=0, mx=0;
   for(const p of seg){ const d=perp(p); sum+=d; sq+=d*d; if(d>mx) mx=d; }
-  const m=seg.length;
-  const coverage = Math.abs(t[hi]-t[lo])/L;         // fraction of the line actually paddled
-  return { avg:sum/m, rms:Math.sqrt(sq/m), max:mx, coverage, track:rawPts.slice(lo,hi+1) };
+  const m=seg.length, coverage = Math.abs(t[hi]-t[lo])/L;
+  return { avg:sum/m, rms:Math.sqrt(sq/m), max:mx, coverage };
+}
+// derive the scoring section (as {lat,lon}) from a stored full route, for the race views
+function segFromFull(fullPts){
+  if(!fullPts || fullPts.length<2) return [];
+  const P=fullPts.map(proj), t=P.map(along);
+  const [lo,hi]=scoringSlice(P,t);
+  return fullPts.slice(lo,hi+1).map(p=>({lat:p.lat,lon:p.lon}));
 }
 
 // ---------- comparison chart colours ----------
@@ -460,18 +472,58 @@ async function renderWeather(force){
     <button class="clear" style="margin-top:8px" onclick="renderWeather(true)">Retry</button></div>`; }
 }
 
-// keep only ~150 points so track shapes travel cheaply to the server / storage
-function downsample(pts, max=150){
-  if(pts.length<=max) return pts.map(p=>({lat:+p.lat.toFixed(6),lon:+p.lon.toFixed(6)}));
-  const step=pts.length/max, out=[];
-  for(let i=0;i<pts.length;i+=step) out.push(pts[Math.floor(i)]);
-  out.push(pts[pts.length-1]);
-  return out.map(p=>({lat:+p.lat.toFixed(6),lon:+p.lon.toFixed(6)}));
+// Compact full route for storage: flat [lat,lon,ele] arrays, ~120 points.
+// Heavy stats are computed at FULL resolution before this, so accuracy is kept.
+function downsampleFull(pts, max=120){
+  const out=[], push=p=>out.push([+p.lat.toFixed(5),+p.lon.toFixed(5), isNaN(p.ele)?null:Math.round(p.ele)]);
+  if(pts.length<=max){ pts.forEach(push); return out; }
+  const step=pts.length/max;
+  for(let i=0;i<pts.length;i+=step) push(pts[Math.floor(i)]);
+  push(pts[pts.length-1]);
+  return out;
+}
+// full-resolution stats for the whole uploaded route
+function smoothArr(a,w){ const o=[]; for(let i=0;i<a.length;i++){ let s=0,c=0;
+  for(let j=-w;j<=w;j++){ const k=i+j; if(k>=0&&k<a.length&&!isNaN(a[k])){s+=a[k];c++;} } o.push(c?s/c:NaN);} return o; }
+function routeStats(pts){
+  if(!pts || pts.length<4) return null;
+  const P=pts.map(proj);
+  const km=pathLen(P)/1000;
+  const eles=pts.map(p=>p.ele).filter(e=>!isNaN(e));
+  let ascent=NaN,descent=NaN,minE=NaN,maxE=NaN;
+  if(eles.length>=Math.max(4,pts.length*0.5)){
+    const sm=smoothArr(pts.map(p=>p.ele),2); ascent=0; descent=0;
+    for(let i=1;i<sm.length;i++){ const d=sm[i]-sm[i-1]; if(isNaN(d))continue;
+      if(d>1) ascent+=d; else if(d<-1) descent+=-d; }
+    minE=Math.min.apply(null,eles); maxE=Math.max.apply(null,eles);
+  }
+  // heading series (unwrapped) → turning captures how the route meanders
+  const head=[];
+  for(let i=1;i<P.length;i++){ const dx=P[i].x-P[i-1].x, dy=P[i].y-P[i-1].y;
+    if(dx||dy) head.push(Math.atan2(dy,dx)); }
+  for(let i=1;i<head.length;i++){ while(head[i]-head[i-1]>Math.PI)head[i]-=2*Math.PI;
+    while(head[i]-head[i-1]<-Math.PI)head[i]+=2*Math.PI; }
+  const {J,L,M,H}=mnj(head);   // J is the Joseph/Hurst of turning; H = J+L+M-1
+  return { km, ascent, descent, minE, maxE, D:fractalDim(P), hurst:J, J, L, M, comp:H, n:P.length };
 }
 
 // ---------- rendering ----------
+// give every row a usable geometry: fullPts [{lat,lon,ele}] + a derived scoring
+// track [{lat,lon}]; recompute stats only if the row didn't come with them.
+function hydrateRows(rows){
+  rows.forEach(r=>{
+    if(r._hyd) return;
+    if(Array.isArray(r.full)) r.fullPts=r.full.map(a=>({lat:a[0],lon:a[1],ele:(a[2]==null?NaN:a[2])}));
+    else if(Array.isArray(r.track)) r.fullPts=r.track.map(p=>({lat:p.lat,lon:p.lon,ele:(p.ele==null?NaN:p.ele)}));
+    else r.fullPts=[];
+    r.track = r.fullPts.length ? segFromFull(r.fullPts) : (r.track||[]);
+    if(!r.stats && r.fullPts.length>=8) r.stats=routeStats(r.fullPts);
+    r._hyd=true;
+  });
+  return rows;
+}
 function render(rows){
-  const b=[...rows].sort((a,c)=>a.avg-c.avg);
+  const b=hydrateRows([...rows]).sort((a,c)=>a.avg-c.avg);
   $('board').innerHTML = b.map((r,i)=>
     `<tr class="${i===0?'win':''}"><td>${i+1}</td>`+
     `<td><span class="cdot" style="background:${colorFor(i)}"></span>${escapeHtml(r.name)}</td>`+
@@ -560,48 +612,80 @@ function mnj(series){
   const H=(isNaN(J)||isNaN(L)||isNaN(M))?NaN:J+L+M-1;
   return {J,L,M,H};
 }
-function analyzeRow(r){
+// scoring-section shape (from the derived scoring track)
+function scoringShape(r){
   const P=(r.track||[]).map(proj);
   if(P.length<2) return null;
   const off=P.map(perpSigned), absOff=off.map(Math.abs);
-  const paddled=pathLen(P);
   const endToEnd=Math.hypot(P[P.length-1].x-P[0].x, P[P.length-1].y-P[0].y);
-  const {J,L,M,H:Hc}=mnj(off);
-  return {
-    n:P.length,
-    mx:Math.max.apply(null,absOff),
-    paddled,
-    sinuosity: endToEnd>0? paddled/endToEnd : NaN,
-    leftFrac: off.filter(d=>d>0).length/off.length,
-    D:fractalDim(P), H:rsHurst(off), J, L, M, Hc
-  };
+  return { mx:Math.max.apply(null,absOff), sinuosity: endToEnd>0? pathLen(P)/endToEnd : NaN,
+           leftFrac: off.filter(d=>d>0).length/off.length };
 }
-const fmt=(v,d=2)=>(v==null||isNaN(v))?'—':v.toFixed(d);
+const fmt=(v,d=2)=>(v==null||isNaN(v))?'—':(+v).toFixed(d);
+
+// 🏆 records across everyone (full-route stats)
+function renderRankings(rows){
+  const host=$('rankings'); if(!host) return;
+  const R=rows.map((r,i)=>({name:r.name,color:colorFor(i),avg:r.avg,s:r.stats})).filter(x=>x.s);
+  if(R.length<1){ host.innerHTML=''; return; }
+  const metrics=[
+    {t:'🚣 Longest route',   f:x=>x.s.km,     u:' km', d:2, hi:true},
+    {t:'⛰ Most climbing',    f:x=>x.s.ascent, u:' m',  d:0, hi:true},
+    {t:'🌀 Wiggliest (fractal D)', f:x=>x.s.D, u:'',    d:3, hi:true},
+    {t:'📈 Highest Hurst',   f:x=>x.s.hurst,  u:'',    d:2, hi:true},
+    {t:'🎯 Straightest on the line', f:x=>x.avg, u:' m', d:2, hi:false},
+  ];
+  const rows3=metrics.map(m=>{
+    const list=R.filter(x=>!isNaN(m.f(x))).sort((a,b)=> m.hi? m.f(b)-m.f(a) : m.f(a)-m.f(b)).slice(0,3);
+    if(!list.length) return '';
+    const medals=['🥇','🥈','🥉'];
+    const items=list.map((x,i)=>`<div class="row"><span class="name">${medals[i]} <span class="cdot" style="background:${x.color}"></span>${escapeHtml(x.name)}</span><span class="val">${fmt(m.f(x),m.d)}${m.u}</span></div>`).join('');
+    return `<div class="metric" style="border-top:0;padding-top:8px"><div class="name" style="margin-bottom:4px">${m.t}</div>${items}</div>`;
+  }).join('');
+  host.innerHTML=`<div class="card"><h1 style="font-size:19px;margin:2px 0 8px">🏆 Records</h1>${rows3}</div>`;
+}
+// map overlaying everyone's FULL route for visual comparison
+function renderCompareMap(rows){
+  const host=$('compareMap'); if(!host) return;
+  const W=Math.max(300, host.clientWidth||480), H=host.clientHeight||360;
+  const pts=[]; rows.forEach(r=>{ if(isHidden(r.name)) return; (r.fullPts||[]).forEach(p=>pts.push([p.lat,p.lon])); });
+  if(pts.length<2){ host.innerHTML='<div class="legend">Upload routes on the Race tab to compare them here.</div>'; return; }
+  const {toXY,tiles}=buildTileMap(W,H,pts,0.08,9);
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px;background:#0e1116">`+tiles+baselineSvg(toXY);
+  rows.forEach((r,i)=>{ if(isHidden(r.name)) return;
+    const pl=(r.fullPts||[]).map(p=>{const[x,y]=toXY(p.lat,p.lon);return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(' ');
+    if(pl) s+=`<polyline points="${pl}" fill="none" stroke="${colorFor(i)}" stroke-width="2.5" stroke-opacity="0.9"/>`;
+  });
+  host.innerHTML=s+fireMarkersSvg(toXY)+attribSvg(H)+`</svg>`;
+}
 function renderAnalyses(rows){
   const host=$('analyses'); if(!host) return;
-  const b=[...rows].sort((a,c)=>a.avg-c.avg);
+  const b=hydrateRows([...rows]).sort((a,c)=>a.avg-c.avg);
+  renderCompareMap(b); renderRankings(b);
   if(!b.length){ host.innerHTML='<div class="card"><span class="muted">No routes yet — upload a GPX on the Race tab.</span></div>'; return; }
   host.innerHTML=b.map((r,i)=>{
-    const a=analyzeRow(r), color=colorFor(i);
+    const color=colorFor(i), sc=scoringShape(r), st=r.stats;
     const head=`<h3><span class="cdot" style="background:${color}"></span>${escapeHtml(r.name)} <span class="muted" style="font-weight:400;font-size:13px">· ${fmt(r.avg)} m avg off</span></h3>`;
-    if(!a) return `<div class="card an" style="border-left-color:${color}">${head}<span class="muted">Track too short to analyse.</span></div>`;
-    const dLabel=isNaN(a.D)?'—':a.D<1.05?'laser-straight':a.D<1.12?'fairly straight':a.D<1.25?'wavy':'very wiggly';
-    const hLabel=isNaN(a.H)?'—':a.H>0.58?'long one-sided drifts':a.H<0.42?'constant zig-zag corrections':'random-walk-like';
-    return `<div class="card an" style="border-left-color:${color}">${head}
-      <div class="grid">
-        <span class="k">Paddled distance</span><span class="v">${fmt(a.paddled/1000,2)} km</span>
-        <span class="k">Straightness (sinuosity)</span><span class="v">${fmt(a.sinuosity,3)}×</span>
-        <span class="k">Worst excursion off line</span><span class="v">${fmt(a.mx,0)} m</span>
-        <span class="k">Side bias (left / right)</span><span class="v">${fmt(a.leftFrac*100,0)}% / ${fmt((1-a.leftFrac)*100,0)}%</span>
-        <span class="k">GPS points used</span><span class="v">${a.n}</span>
-      </div>
-      <div class="metric"><div class="row"><span class="name">Fractal dimension</span><span class="val">${fmt(a.D,3)}</span></div>
-        <div class="exp">How wiggly the path is at every scale — 1.00 = perfectly straight, higher = more crinkled. Yours: <b>${dLabel}</b>.</div></div>
-      <div class="metric"><div class="row"><span class="name">Hurst exponent (of the wander)</span><span class="val">${fmt(a.H,2)}</span></div>
-        <div class="exp">Memory in your side-to-side deviation. &gt;0.5 = long drifts to one side; &lt;0.5 = constant quick corrections; ≈0.5 = random. Yours: <b>${hLabel}</b>.</div></div>
-      <div class="metric"><div class="row"><span class="name">Joseph · Noah · Moses</span><span class="val">${fmt(a.J,2)} · ${fmt(a.L,2)} · ${fmt(a.M,2)}</span></div>
-        <div class="exp"><b>Joseph</b> (correlation) — high = you kept turning the same way. <b>Noah</b> (heavy jumps) — high = a few big swerves dominated. <b>Moses</b> (drift of activity) — high = wandering grew toward the end. Each ≈0.5 for plain random paddling; together they give Hurst ≈ ${fmt(a.Hc,2)}.</div></div>
-    </div>`;
+    let g=`<div class="grid">`;
+    if(st){ g+=`<span class="k">Full route distance</span><span class="v">${fmt(st.km,2)} km</span>`+
+      `<span class="k">Climb ↑ / descent ↓</span><span class="v">${fmt(st.ascent,0)} / ${fmt(st.descent,0)} m</span>`+
+      (isNaN(st.minE)?'':`<span class="k">Elevation range</span><span class="v">${fmt(st.minE,0)}–${fmt(st.maxE,0)} m</span>`); }
+    if(sc){ g+=`<span class="k">Straightness on line</span><span class="v">${fmt(sc.sinuosity,3)}×</span>`+
+      `<span class="k">Worst off the line</span><span class="v">${fmt(sc.mx,0)} m</span>`+
+      `<span class="k">Side bias (L / R)</span><span class="v">${fmt(sc.leftFrac*100,0)}% / ${fmt((1-sc.leftFrac)*100,0)}%</span>`; }
+    g+=`</div>`;
+    let m='';
+    if(st){
+      const dLabel=isNaN(st.D)?'—':st.D<1.05?'laser-straight':st.D<1.12?'fairly straight':st.D<1.25?'wavy':'very wiggly';
+      const hLabel=isNaN(st.hurst)?'—':st.hurst>0.58?'persistent, sweeping turns':st.hurst<0.42?'jittery, constant corrections':'random-walk-like';
+      m=`<div class="metric"><div class="row"><span class="name">Fractal dimension</span><span class="val">${fmt(st.D,3)}</span></div>
+          <div class="exp">How crinkled the whole route is at every scale — 1.00 = straight, higher = wigglier. Yours: <b>${dLabel}</b>.</div></div>
+        <div class="metric"><div class="row"><span class="name">Hurst exponent (turning)</span><span class="val">${fmt(st.hurst,2)}</span></div>
+          <div class="exp">Memory in your steering. &gt;0.5 = persistent long turns; &lt;0.5 = constant corrections; ≈0.5 = random. Yours: <b>${hLabel}</b>.</div></div>
+        <div class="metric"><div class="row"><span class="name">Joseph · Noah · Moses</span><span class="val">${fmt(st.J,2)} · ${fmt(st.L,2)} · ${fmt(st.M,2)}</span></div>
+          <div class="exp"><b>Joseph</b> = correlation (kept turning the same way), <b>Noah</b> = heavy jumps (a few sharp turns), <b>Moses</b> = drift of activity (turning grew later). Each ≈0.5 for plain random paddling; together ≈ ${fmt(st.comp,2)}.</div></div>`;
+    } else { m=`<div class="metric"><span class="muted">Route too short/sparse for the long-memory metrics.</span></div>`; }
+    return `<div class="card an" style="border-left-color:${color}">${head}${g}${m}</div>`;
   }).join('');
 }
 function showTab(which){
@@ -738,12 +822,16 @@ $('scoreBtn').onclick=async ()=>{
     const pts=parseGpx(await file.text());
     if(pts.length<5){ $('err').textContent='That GPX has too few track points.'; return; }
     const s=scoreTrack(pts);
+    const stats=routeStats(pts);                 // full-resolution route stats
     $('resultCard').style.display='block';
     $('scoreBig').textContent=s.avg.toFixed(2)+' m';
-    $('scoreDetail').innerHTML=`rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · covered ${(s.coverage*100).toFixed(0)}% of the line`;
+    let extra=`rms ${s.rms.toFixed(2)} m · worst ${s.max.toFixed(2)} m · covered ${(s.coverage*100).toFixed(0)}% of the line`;
+    if(stats) extra+=`<br>full route: ${stats.km.toFixed(2)} km`+(isNaN(stats.ascent)?'':` · ↑${Math.round(stats.ascent)} m climb`);
+    $('scoreDetail').innerHTML=extra;
     if(s.coverage<0.9) $('scoreWarn').textContent='⚠ Your track covers less than 90% of the course line — did you paddle the whole thing?';
-    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage, track:downsample(s.track) });
-  }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
+    await store.submit({ name, avg:s.avg, rms:s.rms, max:s.max, coverage:s.coverage,
+                         stats, full:downsampleFull(pts) });
+  }catch(e){ $('err').textContent='Could not score that file: '+(e&&e.message==='cloud 403'?'the shared leaderboard is full (100 KB limit) — routes are large; ask the organizer to clear old runs.':e.message); }
   finally{ $('scoreBtn').disabled=false; }
 };
 // ---------- organizer-only controls ----------
@@ -781,7 +869,8 @@ $('refreshBtn').onclick=async ()=>{
 
 renderPlot([]); renderMiniMap([]); renderToggles([]);
 window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows);
-  if($('tab-fires').style.display!=='none') renderFireMap(); });
+  if($('tab-fires').style.display!=='none') renderFireMap();
+  if($('tab-analyses').style.display!=='none') renderCompareMap(lastRows); });
 initBackend().then(()=>store.watch());
 </script>
 </body>
