@@ -115,6 +115,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "bad json"})
         if path == "scores":
             return self._json(200, upsert(data))
+        if path == "delete":
+            name = str(data.get("name", "")).strip().lower()
+            with LOCK:
+                rows = [r for r in load() if r["name"].lower() != name]
+                save(rows)
+            return self._json(200, rows)
         if path == "clear":
             with LOCK:
                 save([])

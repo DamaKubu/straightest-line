@@ -44,9 +44,17 @@
   .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
   #map { height:300px; border-radius:12px; background:#0e1116; }
-  #minimap { height:280px; border-radius:12px; background:#0e1116; }
+  #minimap { height:460px; border-radius:12px; background:#0e1116; }
   .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
   .cdot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:7px; vertical-align:middle; }
+  .toggles { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip { display:inline-flex; align-items:center; gap:2px; padding:7px 10px; border-radius:999px;
+          background:#0e1116; border:1px solid #2b333d; font-size:14px; cursor:pointer; user-select:none; }
+  .chip.off { opacity:.4; text-decoration:line-through; }
+  .chip .cdot { margin-right:4px; }
+  .chip .del { background:none; border:none; color:var(--bad); font-size:15px; font-weight:700;
+          width:auto; padding:0 2px 0 6px; margin:0; cursor:pointer; line-height:1; }
+  .toggles .muted { color:var(--muted); font-size:13px; }
 </style>
 </head>
 <body>
@@ -61,7 +69,8 @@
 
 <div class="card">
   <div id="minimap"></div>
-  <div class="legend">Real map of the section — white dashed = the ideal line (it cuts across land). See who commits to the straight line over the land bits vs. who stays on the water. © OpenStreetMap.</div>
+  <div id="toggles" class="toggles"></div>
+  <div class="legend">Real map of the section — white dashed = the ideal line (it cuts across land). Tap a name to show/hide that route. See who commits to the straight line over the land bits vs. who stays on the water. © OpenStreetMap.</div>
 </div>
 
 <details class="card">
@@ -166,6 +175,11 @@ const PALETTE=['#4cc2ff','#37d67a','#f5a623','#ff5c5c','#b980ff','#ff8fcf',
                '#3ee0c8','#ffd24c','#7aa2ff','#9be15d','#ff9d4c','#e05c8a'];
 const colorFor = i => PALETTE[i % PALETTE.length];
 
+// which paddler routes are hidden from the plots (tap a chip to toggle)
+const hidden = new Set();                 // lowercased names
+function isHidden(name){ return hidden.has(String(name).toLowerCase()); }
+function isAdminFlag(){ return localStorage.getItem('isAdmin')==='1'; }
+
 const perpSigned = p => (p.x-A.x)*(-UY) + (p.y-A.y)*UX;   // signed offset (left/right of line)
 
 // Straightened comparison chart: X = distance along the course, Y = metres off
@@ -176,9 +190,9 @@ function renderPlot(rows){
   const host=$('map'); if(!host) return;
   const W=Math.max(320, host.clientWidth||600), H=300;
   const padL=48, padR=14, padT=16, padB=32;
-  const series=rows.map((r,i)=>({ name:r.name, avg:r.avg, color:colorFor(i),
+  const series=rows.map((r,i)=>({ name:r.name, avg:r.avg, color:colorFor(i), hide:isHidden(r.name),
       pts:(r.track||[]).map(p=>{ const q=proj(p); return {a:along(q), d:perpSigned(q)}; }) }))
-      .filter(s=>s.pts.length);
+      .filter(s=>s.pts.length && !s.hide);
   let yMax=8;
   series.forEach(s=>s.pts.forEach(p=>{ const ad=Math.abs(p.d); if(ad>yMax) yMax=ad; }));
   yMax*=1.15;
@@ -212,19 +226,19 @@ const lat2ny = lat => { const r=lat*Math.PI/180;
   return (1 - Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2; };
 function renderMiniMap(rows){
   const host=$('minimap'); if(!host) return;
-  const W=Math.max(300, host.clientWidth||480), H=280;
-  // bbox over the ideal line + every track point
+  const W=Math.max(300, host.clientWidth||480), H=host.clientHeight||460;
+  // frame the ideal line + only the VISIBLE track points (hidden ones don't zoom us out)
   let minLat=Infinity,maxLat=-Infinity,minLon=Infinity,maxLon=-Infinity;
   const add=(la,lo)=>{ if(la<minLat)minLat=la; if(la>maxLat)maxLat=la;
                        if(lo<minLon)minLon=lo; if(lo>maxLon)maxLon=lo; };
   add(BASELINE.a.lat,BASELINE.a.lon); add(BASELINE.b.lat,BASELINE.b.lon);
-  rows.forEach(r=>(r.track||[]).forEach(p=>add(p.lat,p.lon)));
-  const padLa=(maxLat-minLat)*0.12||0.002, padLo=(maxLon-minLon)*0.12||0.002;
+  rows.forEach(r=>{ if(isHidden(r.name)) return; (r.track||[]).forEach(p=>add(p.lat,p.lon)); });
+  const padLa=(maxLat-minLat)*0.06||0.001, padLo=(maxLon-minLon)*0.06||0.001;
   minLat-=padLa; maxLat+=padLa; minLon-=padLo; maxLon+=padLo;
   const nxW=lon2nx(minLon), nxE=lon2nx(maxLon), nyN=lat2ny(maxLat), nyS=lat2ny(minLat);
   const spanNx=nxE-nxW, spanNy=nyS-nyN;
   let z=Math.floor(Math.min(Math.log2(W/(256*spanNx)), Math.log2(H/(256*spanNy))));
-  z=Math.max(11, Math.min(17, z));
+  z=Math.max(11, Math.min(18, z));
   const world=256*Math.pow(2,z), nTiles=Math.pow(2,z);
   const cx=((nxW+nxE)/2)*world, cy=((nyN+nyS)/2)*world;
   const left=cx-W/2, top=cy-H/2;
@@ -243,8 +257,9 @@ function renderMiniMap(rows){
   s+=`<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="#fff" stroke-width="3" `+
      `stroke-dasharray="8,6" stroke-opacity="0.95"/>`;
   rows.forEach((r,i)=>{
+    if(isHidden(r.name)) return;
     const pl=(r.track||[]).map(p=>{const[x,y]=toXY(p.lat,p.lon);return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(' ');
-    if(pl) s+=`<polyline points="${pl}" fill="none" stroke="${colorFor(i)}" stroke-width="2.5" stroke-opacity="0.9"/>`;
+    if(pl) s+=`<polyline points="${pl}" fill="none" stroke="${colorFor(i)}" stroke-width="3" stroke-opacity="0.9"/>`;
   });
   s+=`<circle cx="${ax}" cy="${ay}" r="5" fill="#37d67a" stroke="#000" stroke-width="1"/>`;
   s+=`<circle cx="${bx}" cy="${by}" r="5" fill="#ff5c5c" stroke="#000" stroke-width="1"/>`;
@@ -273,6 +288,20 @@ function render(rows){
     || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
   renderPlot(b);
   renderMiniMap(b);
+  renderToggles(b);
+}
+
+// one chip per paddler: tap to show/hide their route; organizer also gets a ✕ to delete it
+function renderToggles(rows){
+  const host=$('toggles'); if(!host) return;
+  const admin=isAdminFlag();
+  host.innerHTML = rows.map((r,i)=>{
+    const off=isHidden(r.name)?' off':'';
+    return `<span class="chip${off}" data-name="${escapeHtml(r.name)}">`+
+      `<span class="cdot" style="background:${colorFor(i)}"></span>${escapeHtml(r.name)}`+
+      (admin?`<button class="del" data-del="${escapeHtml(r.name)}" title="Remove result">✕</button>`:'')+
+      `</span>`;
+  }).join('') || '<span class="muted">No routes yet — upload a GPX above.</span>';
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -290,6 +319,8 @@ function localBackend(){
     async submit(r){ const b=load(); const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
       if(i>=0){ if(r.avg<b[i].avg) b[i]=r; } else b.push(r); localStorage.setItem('board',JSON.stringify(b)); render(b); },
     watch(){ render(load()); },
+    async remove(name){ const b=load().filter(x=>x.name.toLowerCase()!==name.toLowerCase());
+      localStorage.setItem('board',JSON.stringify(b)); render(b); },
     async clear(){ localStorage.removeItem('board'); render([]); }
   };
 }
@@ -298,6 +329,7 @@ function serverBackend(){
     async submit(r){ render(await api('POST','scores',r)); },
     watch(){ const tick=async()=>{ try{ render(await api('GET','scores')); }catch(e){} };
              tick(); setInterval(tick,3000); },
+    async remove(name){ render(await api('POST','delete',{name})); },
     async clear(){ render(await api('POST','clear',{})); }
   };
 }
@@ -348,22 +380,35 @@ $('scoreBtn').onclick=async ()=>{
   }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
   finally{ $('scoreBtn').disabled=false; }
 };
-// ---------- organizer-only "Clear leaderboard" ----------
-// The page is public, so the clear control is hidden from paddlers. The organizer
-// unlocks it once per device by opening the page with  ?admin=<ADMIN_KEY>  — the
-// flag is then remembered in localStorage on that (judge) phone.
+// ---------- organizer-only controls ----------
+// The page is public, so the clear/delete controls are hidden from paddlers. The
+// organizer unlocks them once per device by opening the page with ?admin=<ADMIN_KEY>
+// — the flag is then remembered in localStorage on that (judge) phone.
 const ADMIN_KEY='damakubu-2026';   // change this if it ever leaks
 (function setupAdmin(){
   const q=new URLSearchParams(location.search);
   if(q.get('admin')===ADMIN_KEY) localStorage.setItem('isAdmin','1');
   if(q.get('admin')==='off')     localStorage.removeItem('isAdmin');
-  if(localStorage.getItem('isAdmin')==='1'){
+  if(isAdminFlag()){
     $('clearBtn').style.display='';
     $('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard for everyone?')) await store.clear(); };
   }
 })();
 
-renderPlot([]); renderMiniMap([]);
+// tap a chip to show/hide a route; organizer taps ✕ to delete that result
+$('toggles').addEventListener('click', async e=>{
+  const del=e.target.closest('[data-del]');
+  if(del){ e.stopPropagation();
+    const name=del.getAttribute('data-del');
+    if(confirm('Remove '+name+"'s result from the leaderboard?")){ try{ await store.remove(name); }catch(err){ alert('Could not remove: '+err.message); } }
+    return; }
+  const chip=e.target.closest('[data-name]');
+  if(chip){ const key=chip.getAttribute('data-name').toLowerCase();
+    if(hidden.has(key)) hidden.delete(key); else hidden.add(key);
+    renderPlot(lastRows); renderMiniMap(lastRows); renderToggles(lastRows); }
+});
+
+renderPlot([]); renderMiniMap([]); renderToggles([]);
 window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows); });
 initBackend().then(()=>store.watch());
 </script>
