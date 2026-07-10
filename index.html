@@ -55,12 +55,35 @@
   .chip .del { background:none; border:none; color:var(--bad); font-size:15px; font-weight:700;
           width:auto; padding:0 2px 0 6px; margin:0; cursor:pointer; line-height:1; }
   .toggles .muted { color:var(--muted); font-size:13px; }
+  .tabs { display:flex; gap:8px; margin-bottom:14px; }
+  .tabs button { flex:1; padding:12px; font-size:15px; font-weight:700; border-radius:12px;
+          background:var(--card); color:var(--muted); border:1px solid #2b333d; }
+  .tabs button.active { background:var(--accent); color:#08131b; border-color:var(--accent); }
+  .intro { font-size:13px; color:var(--muted); line-height:1.55; }
+  .intro b { color:var(--text); }
+  .an { border-left:4px solid #444; }
+  .an h3 { margin:0 0 10px; font-size:17px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+  .an .grid { display:grid; grid-template-columns:1fr auto; gap:6px 14px; font-size:14px; }
+  .an .grid .k { color:var(--muted); }
+  .an .grid .v { text-align:right; font-weight:600; }
+  .metric { margin-top:10px; padding-top:10px; border-top:1px solid #232b34; }
+  .metric .row { display:flex; justify-content:space-between; font-size:14px; }
+  .metric .name { font-weight:600; }
+  .metric .val { font-weight:700; color:var(--accent); }
+  .metric .exp { color:var(--muted); font-size:12.5px; margin-top:3px; line-height:1.5; }
 </style>
 </head>
 <body>
 <h1>🛶 VAMZDIECAS 2026</h1>
 <div class="tag">Straightest Line — paddle the marked line, closest to it wins.</div>
 <div class="mode" id="mode"></div>
+
+<div class="tabs">
+  <button id="tabRaceBtn" class="active" onclick="showTab('race')">🏁 Race</button>
+  <button id="tabAnBtn" onclick="showTab('analyses')">📊 Analyses</button>
+</div>
+
+<div id="tab-race">
 
 <div class="card">
   <div id="map"></div>
@@ -112,6 +135,21 @@
 <div class="hint">
   Record your paddle with any app that exports a <b>.gpx</b> file, then upload it here.
   Only the part of your track along the course line is scored — the approach and run-out are ignored.
+</div>
+
+</div><!-- /tab-race -->
+
+<div id="tab-analyses" style="display:none">
+  <div class="card">
+    <h1 style="font-size:19px;margin:2px 0 8px">📊 Route analyses</h1>
+    <div class="intro">
+      Exploratory shape-metrics for each paddle, computed straight from the GPX track.
+      They describe the <b>character</b> of a route — how straight, how wiggly, how it
+      wandered — not who wins. With only a handful of GPS points they're rough and just
+      for fun. <b>The contest is still decided by lowest “avg off”.</b>
+    </div>
+  </div>
+  <div id="analyses"></div>
 </div>
 
 <script>
@@ -299,6 +337,7 @@ function render(rows){
   renderPlot(b);
   renderMiniMap(b);
   renderToggles(b);
+  if($('tab-analyses') && $('tab-analyses').style.display!=='none') renderAnalyses(b);
 }
 
 // one chip per paddler: tap to show/hide their route; organizer also gets a ✕ to delete it
@@ -312,6 +351,123 @@ function renderToggles(rows){
       (admin?`<button class="del" data-del="${escapeHtml(r.name)}" title="Remove result">✕</button>`:'')+
       `</span>`;
   }).join('') || '<span class="muted">No routes yet — upload a GPX above.</span>';
+}
+
+// ================= route analyses (fractal dimension, Hurst, Moses/Noah/Joseph) =================
+// All computed from the paddler's projected track. These are single-track, small-sample
+// estimators — rough by nature, shown for fun. perpSigned() gives the signed sideways
+// offset from the ideal line (the "wander" signal we analyse).
+function slope(xs, ys){                               // least-squares slope of ys vs xs
+  const n=xs.length; if(n<2) return NaN;
+  let sx=0,sy=0,sxx=0,sxy=0;
+  for(let i=0;i<n;i++){ sx+=xs[i]; sy+=ys[i]; sxx+=xs[i]*xs[i]; sxy+=xs[i]*ys[i]; }
+  const d=n*sxx-sx*sx; return d===0?NaN:(n*sxy-sx*sy)/d;
+}
+function pathLen(P){ let s=0; for(let i=1;i<P.length;i++) s+=Math.hypot(P[i].x-P[i-1].x,P[i].y-P[i-1].y); return s; }
+// divider/compass count: how many chords of length r span the path (Richardson method)
+function dividerCount(P, r){
+  let count=0, cx=P[0].x, cy=P[0].y, i=0, guard=0;
+  while(i<P.length-1 && guard<200000){
+    guard++; let remaining=r, placed=false;
+    while(i<P.length-1){
+      const dx=P[i+1].x-cx, dy=P[i+1].y-cy, dseg=Math.hypot(dx,dy);
+      if(dseg>=remaining){ const t=remaining/dseg; cx+=dx*t; cy+=dy*t; count++; placed=true; break; }
+      remaining-=dseg; cx=P[i+1].x; cy=P[i+1].y; i++;
+    }
+    if(!placed) break;
+  }
+  return count;
+}
+function fractalDim(P){                               // N(r) ~ r^-D  ->  D = -slope(logN, logr)
+  if(P.length<8) return NaN;
+  const total=pathLen(P); if(total<=0) return NaN;
+  const base=total/P.length, xs=[], ys=[];
+  for(let f=1; f<=16; f*=2){ const r=base*f; const N=dividerCount(P,r);
+    if(N>=2){ xs.push(Math.log(r)); ys.push(Math.log(N)); } }
+  if(xs.length<3) return NaN;
+  const D=-slope(xs,ys); return (D>=0.9 && D<3)?D:NaN;
+}
+function rsHurst(series){                             // rescaled-range Hurst:  R/S ~ n^H
+  const N=series.length; if(N<16) return NaN;
+  const xs=[], ys=[];
+  for(let k=8; k<=Math.floor(N/2); k=Math.max(k+1,Math.floor(k*1.6))){
+    const rs=[];
+    for(let start=0; start+k<=N; start+=k){
+      const w=series.slice(start,start+k), mean=w.reduce((a,b)=>a+b,0)/k;
+      let cum=0, mn=Infinity, mx=-Infinity, s2=0;
+      for(const v of w){ const d=v-mean; cum+=d; if(cum<mn)mn=cum; if(cum>mx)mx=cum; s2+=d*d; }
+      const S=Math.sqrt(s2/k); if(S>0) rs.push((mx-mn)/S);
+    }
+    if(rs.length){ xs.push(Math.log(k)); ys.push(Math.log(rs.reduce((a,b)=>a+b,0)/rs.length)); }
+  }
+  return xs.length<2?NaN:slope(xs,ys);
+}
+// Moses/Noah/Joseph decomposition of the increment series (Meyer–Barkai–Kantz).
+// For plain random paddling each ≈0.5 and they combine to Hurst H = J+L+M-1.
+function mnj(series){
+  if(series.length<16) return {J:NaN,L:NaN,M:NaN,H:NaN};
+  const inc=[]; for(let i=1;i<series.length;i++) inc.push(series[i]-series[i-1]);
+  const J=rsHurst(inc);                              // Joseph: correlations
+  const xs=[], yM=[], yL=[]; let sAbs=0, sSq=0;
+  for(let t=0;t<inc.length;t++){ sAbs+=Math.abs(inc[t]); sSq+=inc[t]*inc[t];
+    if(t>=4 && sAbs>0 && sSq>0){ xs.push(Math.log(t+1)); yM.push(Math.log(sAbs)); yL.push(Math.log(sSq)); } }
+  const bM=slope(xs,yM), bL=slope(xs,yL);
+  const M=isNaN(bM)?NaN:bM-0.5;                       // Moses: Σ|δ| ~ t^(M+1/2)
+  const L=isNaN(bL)?NaN:bL/2;                         // Noah:  Σδ² ~ t^(2L)
+  const H=(isNaN(J)||isNaN(L)||isNaN(M))?NaN:J+L+M-1;
+  return {J,L,M,H};
+}
+function analyzeRow(r){
+  const P=(r.track||[]).map(proj);
+  if(P.length<2) return null;
+  const off=P.map(perpSigned), absOff=off.map(Math.abs);
+  const paddled=pathLen(P);
+  const endToEnd=Math.hypot(P[P.length-1].x-P[0].x, P[P.length-1].y-P[0].y);
+  const {J,L,M,H:Hc}=mnj(off);
+  return {
+    n:P.length,
+    mx:Math.max.apply(null,absOff),
+    paddled,
+    sinuosity: endToEnd>0? paddled/endToEnd : NaN,
+    leftFrac: off.filter(d=>d>0).length/off.length,
+    D:fractalDim(P), H:rsHurst(off), J, L, M, Hc
+  };
+}
+const fmt=(v,d=2)=>(v==null||isNaN(v))?'—':v.toFixed(d);
+function renderAnalyses(rows){
+  const host=$('analyses'); if(!host) return;
+  const b=[...rows].sort((a,c)=>a.avg-c.avg);
+  if(!b.length){ host.innerHTML='<div class="card"><span class="muted">No routes yet — upload a GPX on the Race tab.</span></div>'; return; }
+  host.innerHTML=b.map((r,i)=>{
+    const a=analyzeRow(r), color=colorFor(i);
+    const head=`<h3><span class="cdot" style="background:${color}"></span>${escapeHtml(r.name)} <span class="muted" style="font-weight:400;font-size:13px">· ${fmt(r.avg)} m avg off</span></h3>`;
+    if(!a) return `<div class="card an" style="border-left-color:${color}">${head}<span class="muted">Track too short to analyse.</span></div>`;
+    const dLabel=isNaN(a.D)?'—':a.D<1.05?'laser-straight':a.D<1.12?'fairly straight':a.D<1.25?'wavy':'very wiggly';
+    const hLabel=isNaN(a.H)?'—':a.H>0.58?'long one-sided drifts':a.H<0.42?'constant zig-zag corrections':'random-walk-like';
+    return `<div class="card an" style="border-left-color:${color}">${head}
+      <div class="grid">
+        <span class="k">Paddled distance</span><span class="v">${fmt(a.paddled/1000,2)} km</span>
+        <span class="k">Straightness (sinuosity)</span><span class="v">${fmt(a.sinuosity,3)}×</span>
+        <span class="k">Worst excursion off line</span><span class="v">${fmt(a.mx,0)} m</span>
+        <span class="k">Side bias (left / right)</span><span class="v">${fmt(a.leftFrac*100,0)}% / ${fmt((1-a.leftFrac)*100,0)}%</span>
+        <span class="k">GPS points used</span><span class="v">${a.n}</span>
+      </div>
+      <div class="metric"><div class="row"><span class="name">Fractal dimension</span><span class="val">${fmt(a.D,3)}</span></div>
+        <div class="exp">How wiggly the path is at every scale — 1.00 = perfectly straight, higher = more crinkled. Yours: <b>${dLabel}</b>.</div></div>
+      <div class="metric"><div class="row"><span class="name">Hurst exponent (of the wander)</span><span class="val">${fmt(a.H,2)}</span></div>
+        <div class="exp">Memory in your side-to-side deviation. &gt;0.5 = long drifts to one side; &lt;0.5 = constant quick corrections; ≈0.5 = random. Yours: <b>${hLabel}</b>.</div></div>
+      <div class="metric"><div class="row"><span class="name">Joseph · Noah · Moses</span><span class="val">${fmt(a.J,2)} · ${fmt(a.L,2)} · ${fmt(a.M,2)}</span></div>
+        <div class="exp"><b>Joseph</b> (correlation) — high = you kept turning the same way. <b>Noah</b> (heavy jumps) — high = a few big swerves dominated. <b>Moses</b> (drift of activity) — high = wandering grew toward the end. Each ≈0.5 for plain random paddling; together they give Hurst ≈ ${fmt(a.Hc,2)}.</div></div>
+    </div>`;
+  }).join('');
+}
+function showTab(which){
+  const an=which==='analyses';
+  $('tab-race').style.display=an?'none':'';
+  $('tab-analyses').style.display=an?'':'none';
+  $('tabRaceBtn').classList.toggle('active',!an);
+  $('tabAnBtn').classList.toggle('active',an);
+  if(an) renderAnalyses(lastRows);
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
