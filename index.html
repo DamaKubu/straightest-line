@@ -105,6 +105,7 @@
     <thead><tr><th>#</th><th>Paddler</th><th style="text-align:right">Avg off</th></tr></thead>
     <tbody id="board"></tbody>
   </table>
+  <button class="clear" id="refreshBtn">🔄 Refresh leaderboard</button>
   <button class="clear" id="clearBtn" style="display:none">Clear leaderboard (organizer)</button>
 </div>
 
@@ -305,7 +306,50 @@ function renderToggles(rows){
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-// ---------- backend: shared server (same origin) with localStorage fallback ----------
+// ===================================================================
+//  CLOUD STORAGE (JSONBin.io) — shared leaderboard over the internet.
+//  Paste your own values below. Until then the page uses the LAN server
+//  (server.py) if reachable, otherwise this-device-only storage.
+//    binId : the ID of a JSONBin bin whose content starts as  []
+//    key   : an Access Key with Bin Read + Bin Update permission
+//  (These sit in a public page on purpose — the Access Key can only
+//   read/update this one bin, nothing else on your account.)
+// ===================================================================
+const JSONBIN = { binId:'REPLACE_BIN_ID', key:'REPLACE_ACCESS_KEY' };
+const jbConfigured = () => JSONBIN.binId && !/^REPLACE/.test(JSONBIN.binId);
+async function jbGet(){
+  const r=await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN.binId}/latest`,
+    { headers:{ 'X-Access-Key':JSONBIN.key, 'X-Bin-Meta':'false' } });
+  if(!r.ok) throw new Error('cloud '+r.status);
+  const j=await r.json();
+  const rec = Array.isArray(j) ? j : (j.record || []);
+  return Array.isArray(rec) ? rec : [];
+}
+async function jbPut(rows){
+  const r=await fetch(`https://api.jsonbin.io/v3/b/${JSONBIN.binId}`,
+    { method:'PUT', headers:{ 'X-Access-Key':JSONBIN.key, 'Content-Type':'application/json' },
+      body:JSON.stringify(rows) });
+  if(!r.ok) throw new Error('cloud '+r.status);
+  return rows;
+}
+function upsertBest(rows, r){
+  const i=rows.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
+  if(i>=0){ if(r.avg<rows[i].avg) rows[i]=r; } else rows.push(r);
+  return rows;
+}
+function jsonbinBackend(){
+  return {
+    async submit(r){ const rows=upsertBest(await jbGet(), r); await jbPut(rows); render(rows); },
+    watch(){ const tick=async()=>{ try{ render(await jbGet()); }catch(e){} };
+             tick(); setInterval(tick, 15000); },   // gentle poll (free-tier friendly)
+    async reload(){ render(await jbGet()); },
+    async remove(name){ const rows=(await jbGet()).filter(x=>x.name.toLowerCase()!==name.toLowerCase());
+             await jbPut(rows); render(rows); },
+    async clear(){ await jbPut([]); render([]); }
+  };
+}
+
+// ---------- backend: LAN server (same origin) with localStorage fallback ----------
 let store, SHARED=false;
 async function api(method, path, body){
   const r=await fetch(path,{method,headers:{'Content-Type':'application/json'},
@@ -319,6 +363,7 @@ function localBackend(){
     async submit(r){ const b=load(); const i=b.findIndex(x=>x.name.toLowerCase()===r.name.toLowerCase());
       if(i>=0){ if(r.avg<b[i].avg) b[i]=r; } else b.push(r); localStorage.setItem('board',JSON.stringify(b)); render(b); },
     watch(){ render(load()); },
+    async reload(){ render(load()); },
     async remove(name){ const b=load().filter(x=>x.name.toLowerCase()!==name.toLowerCase());
       localStorage.setItem('board',JSON.stringify(b)); render(b); },
     async clear(){ localStorage.removeItem('board'); render([]); }
@@ -329,15 +374,22 @@ function serverBackend(){
     async submit(r){ render(await api('POST','scores',r)); },
     watch(){ const tick=async()=>{ try{ render(await api('GET','scores')); }catch(e){} };
              tick(); setInterval(tick,3000); },
+    async reload(){ try{ render(await api('GET','scores')); }catch(e){} },
     async remove(name){ render(await api('POST','delete',{name})); },
     async clear(){ render(await api('POST','clear',{})); }
   };
 }
+function setMode(color,text){ $('mode').innerHTML=`<span class="dot" style="background:${color}"></span>${text}`; }
 async function initBackend(){
+  if(jbConfigured()){
+    try{ await jbGet(); store=jsonbinBackend(); SHARED=true;
+         setMode('var(--good)','Shared live leaderboard — works everywhere (cloud)'); return; }
+    catch(e){ /* cloud misconfigured/unreachable — fall through */ }
+  }
   try{ await api('GET','scores'); store=serverBackend(); SHARED=true;
-       $('mode').innerHTML='<span class="dot" style="background:var(--good)"></span>Shared live leaderboard'; }
+       setMode('var(--good)','Shared live leaderboard (this network)'); }
   catch(e){ store=localBackend();
-       $('mode').innerHTML='<span class="dot" style="background:var(--warn)"></span>This device only (not connected to the leaderboard server)'; }
+       setMode('var(--warn)','This device only — not connected to a shared leaderboard'); }
 }
 
 // ---------- file picker + drag & drop ----------
@@ -407,6 +459,11 @@ $('toggles').addEventListener('click', async e=>{
     if(hidden.has(key)) hidden.delete(key); else hidden.add(key);
     renderPlot(lastRows); renderMiniMap(lastRows); renderToggles(lastRows); }
 });
+
+$('refreshBtn').onclick=async ()=>{
+  const b=$('refreshBtn'); b.disabled=true; const t=b.textContent; b.textContent='Refreshing…';
+  try{ await store.reload(); }catch(e){} finally{ b.textContent=t; b.disabled=false; }
+};
 
 renderPlot([]); renderMiniMap([]); renderToggles([]);
 window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows); });
