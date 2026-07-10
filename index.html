@@ -45,6 +45,7 @@
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
   #map { height:300px; border-radius:12px; background:#0e1116; }
   #minimap { height:460px; border-radius:12px; background:#0e1116; }
+  #firemap { height:420px; border-radius:12px; background:#0e1116; }
   .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
   .cdot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:7px; vertical-align:middle; }
   .toggles { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
@@ -55,8 +56,8 @@
   .chip .del { background:none; border:none; color:var(--bad); font-size:15px; font-weight:700;
           width:auto; padding:0 2px 0 6px; margin:0; cursor:pointer; line-height:1; }
   .toggles .muted { color:var(--muted); font-size:13px; }
-  .tabs { display:flex; gap:8px; margin-bottom:14px; }
-  .tabs button { flex:1; padding:12px; font-size:15px; font-weight:700; border-radius:12px;
+  .tabs { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .tabs button { flex:1 1 40%; padding:11px 6px; font-size:14px; font-weight:700; border-radius:12px;
           background:var(--card); color:var(--muted); border:1px solid #2b333d; }
   .tabs button.active { background:var(--accent); color:#08131b; border-color:var(--accent); }
   .intro { font-size:13px; color:var(--muted); line-height:1.55; }
@@ -81,6 +82,8 @@
 <div class="tabs">
   <button id="tabRaceBtn" class="active" onclick="showTab('race')">🏁 Race</button>
   <button id="tabAnBtn" onclick="showTab('analyses')">📊 Analyses</button>
+  <button id="tabFireBtn" onclick="showTab('fires')">🔥 Fires</button>
+  <button id="tabWxBtn" onclick="showTab('weather')">🌦 Weather</button>
 </div>
 
 <div id="tab-race">
@@ -152,6 +155,32 @@
   <div id="analyses"></div>
 </div>
 
+<div id="tab-fires" style="display:none">
+  <div class="card">
+    <h1 style="font-size:19px;margin:2px 0 8px">🔥 Fire &amp; rest spots</h1>
+    <div class="intro">
+      Open fire is legal <b>only in a marked fire-pit at an official site</b> — never on the open bank.
+      <b style="color:#ff7a1a">🔴 orange</b> = fire allowed (campsite / laužavietė) ·
+      <b>⚪ grey</b> = rest only (no fire). Most of the route is in <b>Gražutė Regional Park</b>:
+      gather only fallen wood, keep ~25 m from the water, drown the fire fully before leaving.
+      Always check today's <a href="https://www.meteo.lt/prognozes/misku-gaisringumo-klases-prognozes/" target="_blank" style="color:var(--accent)">fire-danger class</a> —
+      during high danger <b>all</b> open fire is banned. Spots from OpenStreetMap; confirm exact pits with the Gražutė directorate (Salakas).
+    </div>
+  </div>
+  <div class="card"><div id="firemap"></div></div>
+  <div id="fireList"></div>
+</div>
+
+<div id="tab-weather" style="display:none">
+  <div class="card">
+    <h1 style="font-size:19px;margin:2px 0 8px">🌦 Weather along the route</h1>
+    <div class="intro">Live forecast for the <b>start</b>, <b>middle</b> and <b>finish</b> of the route
+      (source: Open-Meteo, local Lithuanian time). Tap Refresh to update.</div>
+    <button class="clear" style="margin-top:10px" onclick="renderWeather(true)">🔄 Refresh weather</button>
+  </div>
+  <div id="weather"></div>
+</div>
+
 <script>
 // ===================================================================
 //  COURSE LINE  (from tiesė.kml — "TIESĖ PLAUKIAMA LYGIAI")
@@ -161,6 +190,55 @@ const BASELINE = {
   a: { lat: 55.5749925, lon: 25.9849632 },
   b: { lat: 55.5891772, lon: 26.0485279 }
 };
+
+// Designated fire-pits / campsites / rest spots along the route (from OpenStreetMap).
+const FIRE_SPOTS = [
+  {name:"Degučių stovyklavietė", type:"Campsite", fire:true, lat:55.65468, lon:26.05413},
+  {name:"Dariaus Šileikio Bikėnų stovyklavietė", type:"Campsite", fire:true, lat:55.62966, lon:26.07516},
+  {name:"Bikėnų kaimo stovyklavietė", type:"Campsite", fire:true, lat:55.62849, lon:26.07559},
+  {name:"Campsite (Aukštuolių)", type:"Campsite", fire:true, lat:55.70435, lon:26.08632},
+  {name:"Sabalunkų stovyklavietė", type:"Campsite", fire:true, lat:55.57389, lon:26.15209},
+  {name:"Luodžio stovyklavietė", type:"Campsite", fire:true, lat:55.58202, lon:26.15607},
+  {name:"Asavo stovyklavietė", type:"Campsite", fire:true, lat:55.62721, lon:26.2043},
+  {name:"Asavo stovyklavietė (2)", type:"Campsite", fire:true, lat:55.62389, lon:26.21616},
+  {name:"Fire pit (Zarasai)", type:"Fire pit", fire:true, lat:55.71884, lon:26.2214},
+  {name:"Zarasų kempingas", type:"Campsite", fire:true, lat:55.71911, lon:26.22206},
+  {name:"Fire pit (Zarasai N)", type:"Fire pit", fire:true, lat:55.73242, lon:26.22939},
+  {name:"Fire pit (Zarasai N)", type:"Fire pit", fire:true, lat:55.73177, lon:26.22953},
+  {name:"Fire pit (Zarasai N)", type:"Fire pit", fire:true, lat:55.73143, lon:26.23114},
+  {name:"Fire pit (Zarasai N)", type:"Fire pit", fire:true, lat:55.73143, lon:26.2314},
+  {name:"Žagarinės stovyklavietė", type:"Campsite", fire:true, lat:55.58912, lon:26.24817},
+  {name:"Stovyklavietė prie Antalieptės marių", type:"Rest spot", fire:false, lat:55.6255, lon:26.00643},
+  {name:"Poilsiavietė prie Antalieptės marių", type:"Rest spot", fire:false, lat:55.61939, lon:26.00891},
+  {name:"Gulbinės atokvėpio vieta", type:"Rest spot", fire:false, lat:55.56788, lon:26.03065},
+  {name:"Bikėnų atokvėpio vieta", type:"Rest spot", fire:false, lat:55.62944, lon:26.07584},
+  {name:"Čepeliškių atokvėpio vieta", type:"Rest spot", fire:false, lat:55.58944, lon:26.08503},
+  {name:"Krasnovo sankryžos atokvėpio vieta", type:"Rest spot", fire:false, lat:55.64629, lon:26.1247},
+  {name:"Kamariškių kaimo atokvėpio vieta", type:"Rest spot", fire:false, lat:55.68363, lon:26.12544},
+  {name:"Auslo ežero poilsiavietė", type:"Rest spot", fire:false, lat:55.72218, lon:26.12605},
+  {name:"Šiurpelio poilsiavietė", type:"Rest spot", fire:false, lat:55.64218, lon:26.13044},
+  {name:"Vokiečių karių kapinės", type:"Rest spot", fire:false, lat:55.65414, lon:26.14338},
+  {name:"Gaidžiuko ež. atokvėpio vieta", type:"Rest spot", fire:false, lat:55.63511, lon:26.15297},
+  {name:"Luodžio poilsiavietė", type:"Rest spot", fire:false, lat:55.58264, lon:26.15971},
+  {name:"Juršio staliuko atokvėpio vieta", type:"Rest spot", fire:false, lat:55.6793, lon:26.18889},
+  {name:"Shelter", type:"Shelter", fire:false, lat:55.65178, lon:26.19853},
+  {name:"Tumiškių atokvėpio vieta", type:"Rest spot", fire:false, lat:55.61902, lon:26.22732},
+  {name:"Magučių atokvėpio vieta", type:"Rest spot", fire:false, lat:55.72097, lon:26.27079},
+];
+
+// Weather sample points along the route (Open-Meteo, by lat/lon).
+const WLOC = [
+  { name:'Start · Vajasiškis', lat:55.567,  lon:25.956 },
+  { name:'Middle',            lat:55.660,  lon:26.030 },
+  { name:'Finish · Zarasai',  lat:55.7245, lon:26.2545 },
+];
+const WMO = {0:['Clear','☀️'],1:['Mainly clear','🌤'],2:['Partly cloudy','⛅'],3:['Overcast','☁️'],
+  45:['Fog','🌫'],48:['Rime fog','🌫'],51:['Light drizzle','🌦'],53:['Drizzle','🌦'],55:['Dense drizzle','🌧'],
+  56:['Freezing drizzle','🌧'],57:['Freezing drizzle','🌧'],61:['Light rain','🌦'],63:['Rain','🌧'],65:['Heavy rain','🌧'],
+  66:['Freezing rain','🌧'],67:['Freezing rain','🌧'],71:['Light snow','🌨'],73:['Snow','🌨'],75:['Heavy snow','❄️'],
+  77:['Snow grains','🌨'],80:['Rain showers','🌦'],81:['Showers','🌧'],82:['Violent showers','⛈'],
+  85:['Snow showers','🌨'],86:['Snow showers','🌨'],95:['Thunderstorm','⛈'],96:['Thunderstorm, hail','⛈'],99:['Thunderstorm, hail','⛈']};
+const wdesc = c => { const w=WMO[c]; return w?`${w[1]} ${w[0]}`:'—'; };
 
 const $ = id => document.getElementById(id);
 
@@ -272,49 +350,114 @@ function renderPlot(rows){
 const lon2nx = lon => (lon+180)/360;
 const lat2ny = lat => { const r=lat*Math.PI/180;
   return (1 - Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2; };
-function renderMiniMap(rows){
-  const host=$('minimap'); if(!host) return;
-  const W=Math.max(300, host.clientWidth||480), H=host.clientHeight||460;
-  // frame the ideal line + only the VISIBLE track points (hidden ones don't zoom us out)
+// Build OSM tiles that frame the given [lat,lon] points; returns a projector + tiles SVG.
+function buildTileMap(W, H, pts, padFrac, zMin){
   let minLat=Infinity,maxLat=-Infinity,minLon=Infinity,maxLon=-Infinity;
-  const add=(la,lo)=>{ if(la<minLat)minLat=la; if(la>maxLat)maxLat=la;
-                       if(lo<minLon)minLon=lo; if(lo>maxLon)maxLon=lo; };
-  add(BASELINE.a.lat,BASELINE.a.lon); add(BASELINE.b.lat,BASELINE.b.lon);
-  rows.forEach(r=>{ if(isHidden(r.name)) return; (r.track||[]).forEach(p=>add(p.lat,p.lon)); });
-  const padLa=(maxLat-minLat)*0.06||0.001, padLo=(maxLon-minLon)*0.06||0.001;
+  pts.forEach(([la,lo])=>{ if(la<minLat)minLat=la; if(la>maxLat)maxLat=la;
+                           if(lo<minLon)minLon=lo; if(lo>maxLon)maxLon=lo; });
+  const padLa=(maxLat-minLat)*padFrac||0.001, padLo=(maxLon-minLon)*padFrac||0.001;
   minLat-=padLa; maxLat+=padLa; minLon-=padLo; maxLon+=padLo;
   const nxW=lon2nx(minLon), nxE=lon2nx(maxLon), nyN=lat2ny(maxLat), nyS=lat2ny(minLat);
-  const spanNx=nxE-nxW, spanNy=nyS-nyN;
-  let z=Math.floor(Math.min(Math.log2(W/(256*spanNx)), Math.log2(H/(256*spanNy))));
-  z=Math.max(11, Math.min(18, z));
+  let z=Math.floor(Math.min(Math.log2(W/(256*(nxE-nxW))), Math.log2(H/(256*(nyS-nyN)))));
+  z=Math.max(zMin||9, Math.min(18, z));
   const world=256*Math.pow(2,z), nTiles=Math.pow(2,z);
-  const cx=((nxW+nxE)/2)*world, cy=((nyN+nyS)/2)*world;
-  const left=cx-W/2, top=cy-H/2;
+  const left=((nxW+nxE)/2)*world - W/2, top=((nyN+nyS)/2)*world - H/2;
   const toXY=(la,lo)=>[lon2nx(lo)*world-left, lat2ny(la)*world-top];
-  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px;background:#0e1116">`;
+  let tiles='';
   const tx0=Math.floor(left/256), tx1=Math.floor((left+W)/256);
   const ty0=Math.floor(top/256),  ty1=Math.floor((top+H)/256);
   for(let tx=tx0;tx<=tx1;tx++) for(let ty=ty0;ty<=ty1;ty++){
     if(ty<0||ty>=nTiles) continue;
     const wx=((tx%nTiles)+nTiles)%nTiles;
-    s+=`<image href="https://tile.openstreetmap.org/${z}/${wx}/${ty}.png" `+
-       `x="${tx*256-left}" y="${ty*256-top}" width="256" height="256"/>`;
+    tiles+=`<image href="https://tile.openstreetmap.org/${z}/${wx}/${ty}.png" x="${tx*256-left}" y="${ty*256-top}" width="256" height="256"/>`;
   }
-  const [ax,ay]=toXY(BASELINE.a.lat,BASELINE.a.lon);
-  const [bx,by]=toXY(BASELINE.b.lat,BASELINE.b.lon);
-  s+=`<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="#fff" stroke-width="3" `+
-     `stroke-dasharray="8,6" stroke-opacity="0.95"/>`;
-  rows.forEach((r,i)=>{
-    if(isHidden(r.name)) return;
+  return { toXY, tiles };
+}
+function baselineSvg(toXY){
+  const [ax,ay]=toXY(BASELINE.a.lat,BASELINE.a.lon), [bx,by]=toXY(BASELINE.b.lat,BASELINE.b.lon);
+  return `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="#fff" stroke-width="3" stroke-dasharray="8,6" stroke-opacity="0.95"/>`+
+         `<circle cx="${ax}" cy="${ay}" r="5" fill="#37d67a" stroke="#000" stroke-width="1"/>`+
+         `<circle cx="${bx}" cy="${by}" r="5" fill="#ff5c5c" stroke="#000" stroke-width="1"/>`;
+}
+function tracksSvg(rows, toXY){
+  let s='';
+  rows.forEach((r,i)=>{ if(isHidden(r.name)) return;
     const pl=(r.track||[]).map(p=>{const[x,y]=toXY(p.lat,p.lon);return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(' ');
     if(pl) s+=`<polyline points="${pl}" fill="none" stroke="${colorFor(i)}" stroke-width="3" stroke-opacity="0.9"/>`;
   });
-  s+=`<circle cx="${ax}" cy="${ay}" r="5" fill="#37d67a" stroke="#000" stroke-width="1"/>`;
-  s+=`<circle cx="${bx}" cy="${by}" r="5" fill="#ff5c5c" stroke="#000" stroke-width="1"/>`;
-  s+=`<text x="6" y="${H-6}" fill="#c9d3dd" font-size="10" style="paint-order:stroke" `+
-     `stroke="#000" stroke-width="2">© OpenStreetMap</text>`;
-  s+=`</svg>`;
-  host.innerHTML=s;
+  return s;
+}
+function fireMarkersSvg(toXY){
+  let s='';
+  FIRE_SPOTS.forEach(f=>{ const [x,y]=toXY(f.lat,f.lon);
+    if(f.fire) s+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="5.5" fill="#ff7a1a" stroke="#000" stroke-width="1.2"><title>🔥 ${escapeHtml(f.name)} — fire OK (${escapeHtml(f.type)})</title></circle>`;
+    else       s+=`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="3.5" fill="#9aa4ad" stroke="#000" stroke-width="0.8"><title>${escapeHtml(f.name)} — rest only (${escapeHtml(f.type)})</title></circle>`;
+  });
+  return s;
+}
+const attribSvg = H => `<text x="6" y="${H-6}" fill="#c9d3dd" font-size="10" style="paint-order:stroke" stroke="#000" stroke-width="2">© OpenStreetMap</text>`;
+
+function renderMiniMap(rows){
+  const host=$('minimap'); if(!host) return;
+  const W=Math.max(300, host.clientWidth||480), H=host.clientHeight||460;
+  // frame the ideal line + only the VISIBLE track points (hidden ones don't zoom us out)
+  const pts=[[BASELINE.a.lat,BASELINE.a.lon],[BASELINE.b.lat,BASELINE.b.lon]];
+  rows.forEach(r=>{ if(isHidden(r.name)) return; (r.track||[]).forEach(p=>pts.push([p.lat,p.lon])); });
+  const {toXY,tiles}=buildTileMap(W,H,pts,0.06,11);
+  host.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px;background:#0e1116">`+
+    tiles + baselineSvg(toXY) + tracksSvg(rows,toXY) + fireMarkersSvg(toXY) + attribSvg(H) + `</svg>`;
+}
+// Fires tab map — framed wide to show ALL fire/rest spots + the route.
+function renderFireMap(){
+  const host=$('firemap'); if(!host) return;
+  const W=Math.max(300, host.clientWidth||480), H=host.clientHeight||420;
+  const pts=[[BASELINE.a.lat,BASELINE.a.lon],[BASELINE.b.lat,BASELINE.b.lon]];
+  FIRE_SPOTS.forEach(f=>pts.push([f.lat,f.lon]));
+  lastRows.forEach(r=>{ if(isHidden(r.name)) return; (r.track||[]).forEach(p=>pts.push([p.lat,p.lon])); });
+  const {toXY,tiles}=buildTileMap(W,H,pts,0.08,9);
+  host.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px;background:#0e1116">`+
+    tiles + baselineSvg(toXY) + tracksSvg(lastRows,toXY) + fireMarkersSvg(toXY) + attribSvg(H) + `</svg>`;
+}
+function renderFireList(){
+  const host=$('fireList'); if(!host) return;
+  const mk=arr=>arr.map(f=>`<div class="metric" style="border-top:0;padding-top:6px">
+    <div class="row"><span class="name">${f.fire?'🔥':'⚪'} ${escapeHtml(f.name)}</span>
+      <a class="val" href="https://www.google.com/maps?q=${f.lat},${f.lon}" target="_blank" style="text-decoration:none">map ↗</a></div>
+    <div class="exp">${escapeHtml(f.type)}${f.fire?' · fire OK at the pit':' · rest only, no fire'} · ${f.lat.toFixed(4)}, ${f.lon.toFixed(4)}</div>
+  </div>`).join('');
+  const fire=FIRE_SPOTS.filter(f=>f.fire), rest=FIRE_SPOTS.filter(f=>!f.fire);
+  host.innerHTML=`<div class="card"><h3 style="margin:0 0 6px;font-size:16px">🔥 Fire allowed (${fire.length})</h3>${mk(fire)}</div>`+
+    `<div class="card"><h3 style="margin:0 0 6px;font-size:16px">⚪ Rest only — no fire (${rest.length})</h3>${mk(rest)}</div>`;
+}
+// Weather tab — live Open-Meteo forecast for the route's start / middle / finish.
+let weatherLoaded=false;
+async function renderWeather(force){
+  const host=$('weather'); if(!host) return;
+  if(weatherLoaded && !force) return;
+  host.innerHTML='<div class="card"><span class="muted">Loading forecast…</span></div>';
+  try{
+    const lats=WLOC.map(l=>l.lat).join(','), lons=WLOC.map(l=>l.lon).join(',');
+    const url=`https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}`+
+      `&current=temperature_2m,precipitation,weather_code,wind_speed_10m`+
+      `&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m`+
+      `&timezone=Europe%2FVilnius&forecast_days=2`;
+    const r=await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status);
+    let data=await r.json(); if(!Array.isArray(data)) data=[data];
+    host.innerHTML=data.map((d,i)=>{
+      const loc=WLOC[i]||{name:'Point '+(i+1)}, cur=d.current||{}, th=d.hourly;
+      let ti=th.time.findIndex(t=>t.endsWith('21:00')); if(ti<0) ti=Math.min(th.time.length-1,20);
+      return `<div class="card"><h3 style="margin:0 0 8px;font-size:16px">${escapeHtml(loc.name)}</h3>
+        <div class="grid">
+          <span class="k">Now</span><span class="v">${wdesc(cur.weather_code)} · ${Math.round(cur.temperature_2m)}°C</span>
+          <span class="k">Wind now</span><span class="v">${Math.round(cur.wind_speed_10m)} km/h</span>
+          <span class="k">Tonight 21:00</span><span class="v">${wdesc(th.weather_code[ti])} · ${Math.round(th.temperature_2m[ti])}°C</span>
+          <span class="k">Rain chance 21:00</span><span class="v">${th.precipitation_probability[ti]}%</span>
+          <span class="k">Wind 21:00</span><span class="v">${Math.round(th.wind_speed_10m[ti])} km/h</span>
+        </div></div>`;
+    }).join('');
+    weatherLoaded=true;
+  }catch(e){ host.innerHTML=`<div class="card"><span class="err">Could not load weather: ${escapeHtml(e.message)}.</span>
+    <button class="clear" style="margin-top:8px" onclick="renderWeather(true)">Retry</button></div>`; }
 }
 
 // keep only ~150 points so track shapes travel cheaply to the server / storage
@@ -462,12 +605,14 @@ function renderAnalyses(rows){
   }).join('');
 }
 function showTab(which){
-  const an=which==='analyses';
-  $('tab-race').style.display=an?'none':'';
-  $('tab-analyses').style.display=an?'':'none';
-  $('tabRaceBtn').classList.toggle('active',!an);
-  $('tabAnBtn').classList.toggle('active',an);
-  if(an) renderAnalyses(lastRows);
+  ['race','analyses','fires','weather'].forEach(t=>{ const el=$('tab-'+t); if(el) el.style.display=(t===which)?'':'none'; });
+  $('tabRaceBtn').classList.toggle('active',which==='race');
+  $('tabAnBtn').classList.toggle('active',which==='analyses');
+  $('tabFireBtn').classList.toggle('active',which==='fires');
+  $('tabWxBtn').classList.toggle('active',which==='weather');
+  if(which==='analyses') renderAnalyses(lastRows);
+  if(which==='fires'){ renderFireMap(); renderFireList(); }
+  if(which==='weather') renderWeather();
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -635,7 +780,8 @@ $('refreshBtn').onclick=async ()=>{
 };
 
 renderPlot([]); renderMiniMap([]); renderToggles([]);
-window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows); });
+window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows);
+  if($('tab-fires').style.display!=='none') renderFireMap(); });
 initBackend().then(()=>store.watch());
 </script>
 </body>
