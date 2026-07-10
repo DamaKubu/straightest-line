@@ -16,12 +16,16 @@
   label { display:block; font-size:14px; color:var(--muted); margin-bottom:6px; }
   input[type=text] { width:100%; padding:14px; font-size:18px; border-radius:10px;
           border:1px solid #2b333d; background:#0e1116; color:var(--text); margin-bottom:14px; }
-  .drop { border:2px dashed #3a444f; border-radius:12px;
+  .drop { position:relative; border:2px dashed #3a444f; border-radius:12px;
           padding:22px 14px; text-align:center; margin-bottom:14px; cursor:pointer;
           background:#0e1116; transition:border-color .15s, background .15s; }
   .drop.over { border-color:var(--good); background:#132019; }
   .drop .big { font-size:17px; font-weight:600; }
   .drop .sub { font-size:13px; color:var(--muted); }
+  /* the real file input physically covers the whole zone, so a tap/click/drop
+     hits it natively — no JS proxy that mobile browsers can block */
+  .drop input[type=file] { position:absolute; inset:0; width:100%; height:100%;
+          opacity:0; cursor:pointer; }
   button { width:100%; padding:18px; font-size:20px; font-weight:700;
            border:none; border-radius:14px; background:var(--good); color:#08131b; }
   button:disabled { opacity:.4; }
@@ -40,6 +44,7 @@
   .mode { text-align:center; font-size:12px; color:var(--muted); margin-bottom:10px; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
   #map { height:300px; border-radius:12px; background:#0e1116; }
+  #minimap { height:280px; border-radius:12px; background:#0e1116; }
   .legend { font-size:12px; color:var(--muted); text-align:center; margin-top:8px; }
   .cdot { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:7px; vertical-align:middle; }
 </style>
@@ -54,6 +59,11 @@
   <div class="legend">Straightened view — white dashed = ideal line · ↔ distance along course · ↕ metres off the line (exaggerated). Each paddler has their own colour, matching the leaderboard.</div>
 </div>
 
+<div class="card">
+  <div id="minimap"></div>
+  <div class="legend">Real map of the section — white dashed = the ideal line (it cuts across land). See who commits to the straight line over the land bits vs. who stays on the water. © OpenStreetMap.</div>
+</div>
+
 <details class="card">
   <summary style="cursor:pointer;color:var(--muted);font-size:14px">🗺️ Official course map (Google) — needs the My Map shared publicly</summary>
   <iframe src="https://www.google.com/maps/d/embed?mid=1mEGuDQf7deYDtFCfAw6OI-YlnDuiglw&ehbc=2E312F"
@@ -65,8 +75,8 @@
   <input id="name" type="text" placeholder="e.g. Danielius" autocomplete="off">
   <label>Your GPX file (exported from Strava or any tracking app)</label>
   <div id="drop" class="drop">
-    <input id="gpx" type="file" accept=".gpx,application/gpx+xml,application/octet-stream" hidden>
     <div id="dropText"><div class="big">📂 Tap to choose your GPX</div><div class="sub">or drag &amp; drop the file here</div></div>
+    <input id="gpx" type="file" accept=".gpx,application/gpx+xml,application/octet-stream">
   </div>
   <button id="scoreBtn">Score my run</button>
   <div class="err" id="err"></div>
@@ -86,7 +96,7 @@
     <thead><tr><th>#</th><th>Paddler</th><th style="text-align:right">Avg off</th></tr></thead>
     <tbody id="board"></tbody>
   </table>
-  <button class="clear" id="clearBtn">Clear leaderboard</button>
+  <button class="clear" id="clearBtn" style="display:none">Clear leaderboard (organizer)</button>
 </div>
 
 <div class="hint">
@@ -193,6 +203,57 @@ function renderPlot(rows){
   s+=`</svg>`;
   host.innerHTML=s;
 }
+
+// ---------- real geographic mini-map (OpenStreetMap raster tiles, no library) ----------
+// Web-Mercator tiles fetched directly as <image> and the ideal line + coloured
+// tracks drawn on top. No Leaflet, no API key, no auth — just open OSM tiles.
+const lon2nx = lon => (lon+180)/360;
+const lat2ny = lat => { const r=lat*Math.PI/180;
+  return (1 - Math.log(Math.tan(r)+1/Math.cos(r))/Math.PI)/2; };
+function renderMiniMap(rows){
+  const host=$('minimap'); if(!host) return;
+  const W=Math.max(300, host.clientWidth||480), H=280;
+  // bbox over the ideal line + every track point
+  let minLat=Infinity,maxLat=-Infinity,minLon=Infinity,maxLon=-Infinity;
+  const add=(la,lo)=>{ if(la<minLat)minLat=la; if(la>maxLat)maxLat=la;
+                       if(lo<minLon)minLon=lo; if(lo>maxLon)maxLon=lo; };
+  add(BASELINE.a.lat,BASELINE.a.lon); add(BASELINE.b.lat,BASELINE.b.lon);
+  rows.forEach(r=>(r.track||[]).forEach(p=>add(p.lat,p.lon)));
+  const padLa=(maxLat-minLat)*0.12||0.002, padLo=(maxLon-minLon)*0.12||0.002;
+  minLat-=padLa; maxLat+=padLa; minLon-=padLo; maxLon+=padLo;
+  const nxW=lon2nx(minLon), nxE=lon2nx(maxLon), nyN=lat2ny(maxLat), nyS=lat2ny(minLat);
+  const spanNx=nxE-nxW, spanNy=nyS-nyN;
+  let z=Math.floor(Math.min(Math.log2(W/(256*spanNx)), Math.log2(H/(256*spanNy))));
+  z=Math.max(11, Math.min(17, z));
+  const world=256*Math.pow(2,z), nTiles=Math.pow(2,z);
+  const cx=((nxW+nxE)/2)*world, cy=((nyN+nyS)/2)*world;
+  const left=cx-W/2, top=cy-H/2;
+  const toXY=(la,lo)=>[lon2nx(lo)*world-left, lat2ny(la)*world-top];
+  let s=`<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="display:block;border-radius:12px;background:#0e1116">`;
+  const tx0=Math.floor(left/256), tx1=Math.floor((left+W)/256);
+  const ty0=Math.floor(top/256),  ty1=Math.floor((top+H)/256);
+  for(let tx=tx0;tx<=tx1;tx++) for(let ty=ty0;ty<=ty1;ty++){
+    if(ty<0||ty>=nTiles) continue;
+    const wx=((tx%nTiles)+nTiles)%nTiles;
+    s+=`<image href="https://tile.openstreetmap.org/${z}/${wx}/${ty}.png" `+
+       `x="${tx*256-left}" y="${ty*256-top}" width="256" height="256"/>`;
+  }
+  const [ax,ay]=toXY(BASELINE.a.lat,BASELINE.a.lon);
+  const [bx,by]=toXY(BASELINE.b.lat,BASELINE.b.lon);
+  s+=`<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="#fff" stroke-width="3" `+
+     `stroke-dasharray="8,6" stroke-opacity="0.95"/>`;
+  rows.forEach((r,i)=>{
+    const pl=(r.track||[]).map(p=>{const[x,y]=toXY(p.lat,p.lon);return `${x.toFixed(1)},${y.toFixed(1)}`;}).join(' ');
+    if(pl) s+=`<polyline points="${pl}" fill="none" stroke="${colorFor(i)}" stroke-width="2.5" stroke-opacity="0.9"/>`;
+  });
+  s+=`<circle cx="${ax}" cy="${ay}" r="5" fill="#37d67a" stroke="#000" stroke-width="1"/>`;
+  s+=`<circle cx="${bx}" cy="${by}" r="5" fill="#ff5c5c" stroke="#000" stroke-width="1"/>`;
+  s+=`<text x="6" y="${H-6}" fill="#c9d3dd" font-size="10" style="paint-order:stroke" `+
+     `stroke="#000" stroke-width="2">© OpenStreetMap</text>`;
+  s+=`</svg>`;
+  host.innerHTML=s;
+}
+
 // keep only ~150 points so track shapes travel cheaply to the server / storage
 function downsample(pts, max=150){
   if(pts.length<=max) return pts.map(p=>({lat:+p.lat.toFixed(6),lon:+p.lon.toFixed(6)}));
@@ -211,6 +272,7 @@ function render(rows){
     `<td class="score">${r.avg.toFixed(2)} m</td></tr>`).join('')
     || '<tr><td colspan="3" style="color:var(--muted)">No runs yet</td></tr>';
   renderPlot(b);
+  renderMiniMap(b);
 }
 const escapeHtml = s => s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -247,21 +309,24 @@ async function initBackend(){
 }
 
 // ---------- file picker + drag & drop ----------
+// The <input type=file> physically covers the drop zone (opacity 0), so tapping
+// on a phone or clicking on desktop hits it natively — no proxy .click() that
+// mobile browsers can silently block. Dropping a file onto it also works natively.
 let chosenFile=null;
 const drop=$('drop'), gpx=$('gpx');
 function setFile(f){
+  if(!f) return;
   chosenFile=f;
-  $('dropText').innerHTML = f
-    ? `<div class="big">✅ ${escapeHtml(f.name)}</div><div class="sub">tap to choose a different file</div>`
-    : `<div class="big">📂 Tap to choose your GPX</div><div class="sub">or drag &amp; drop the file here</div>`;
+  $('dropText').innerHTML =
+    `<div class="big">✅ ${escapeHtml(f.name)}</div><div class="sub">tap to choose a different file</div>`;
 }
-drop.addEventListener('click', ()=>gpx.click());
-gpx.addEventListener('change', ()=>{ if(gpx.files[0]) setFile(gpx.files[0]); });
-// drag & drop anywhere on the page (desktop)
+gpx.addEventListener('change', ()=>setFile(gpx.files[0]));
+// extra: allow dropping anywhere on the page (desktop), and show the highlight
 ['dragenter','dragover'].forEach(ev=>window.addEventListener(ev,e=>{ e.preventDefault(); drop.classList.add('over'); }));
 window.addEventListener('dragleave', e=>{ if(!e.relatedTarget) drop.classList.remove('over'); });
 window.addEventListener('drop', e=>{ e.preventDefault(); drop.classList.remove('over');
-  const f=e.dataTransfer && e.dataTransfer.files[0]; if(f) setFile(f); });
+  const f=e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if(f){ try{ gpx.files=e.dataTransfer.files; }catch(_){}; setFile(f); } });
 
 // ---------- action ----------
 $('scoreBtn').onclick=async ()=>{
@@ -283,10 +348,23 @@ $('scoreBtn').onclick=async ()=>{
   }catch(e){ $('err').textContent='Could not score that file: '+e.message; }
   finally{ $('scoreBtn').disabled=false; }
 };
-$('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard?')) await store.clear(); };
+// ---------- organizer-only "Clear leaderboard" ----------
+// The page is public, so the clear control is hidden from paddlers. The organizer
+// unlocks it once per device by opening the page with  ?admin=<ADMIN_KEY>  — the
+// flag is then remembered in localStorage on that (judge) phone.
+const ADMIN_KEY='damakubu-2026';   // change this if it ever leaks
+(function setupAdmin(){
+  const q=new URLSearchParams(location.search);
+  if(q.get('admin')===ADMIN_KEY) localStorage.setItem('isAdmin','1');
+  if(q.get('admin')==='off')     localStorage.removeItem('isAdmin');
+  if(localStorage.getItem('isAdmin')==='1'){
+    $('clearBtn').style.display='';
+    $('clearBtn').onclick=async ()=>{ if(confirm('Clear the whole leaderboard for everyone?')) await store.clear(); };
+  }
+})();
 
-renderPlot([]);
-window.addEventListener('resize', ()=>renderPlot(lastRows));
+renderPlot([]); renderMiniMap([]);
+window.addEventListener('resize', ()=>{ renderPlot(lastRows); renderMiniMap(lastRows); });
 initBackend().then(()=>store.watch());
 </script>
 </body>
