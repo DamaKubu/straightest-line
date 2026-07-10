@@ -156,19 +156,28 @@ function parseGpx(text){
 function scoreTrack(rawPts){
   const P = rawPts.map(proj);
   const t = P.map(along);
-  let si=0, fi=0, sb=Infinity, fb=Infinity;
-  for(let i=0;i<t.length;i++){
-    const ds=Math.abs(t[i]);      if(ds<sb){ sb=ds; si=i; }
-    const df=Math.abs(t[i]-L);    if(df<fb){ fb=df; fi=i; }
-  }
-  let lo=Math.min(si,fi), hi=Math.max(si,fi);       // handle either paddling direction
+  const n = t.length;
+  // START gate: the track point closest to the A end (along ≈ 0).
+  let si=0, sb=Infinity;
+  for(let i=0;i<n;i++){ const d=Math.abs(t[i]); if(d<sb){ sb=d; si=i; } }
+  // FINISH gate: the FIRST point, scanning outward from the start, that reaches
+  // the B end. Scanning outward (instead of global nearest-to-L) stops a track
+  // that is much longer than the line — or loops back — from matching a far-away
+  // point that merely shares the same along-course position.
+  const TH = L*0.98;
+  let fi=-1;
+  for(let i=si+1;i<n;i++){ if(t[i]>=TH){ fi=i; break; } }        // paddled A → B
+  if(fi<0) for(let i=si-1;i>=0;i--){ if(t[i]>=TH){ fi=i; break; } }  // paddled B → A
+  if(fi<0){ let fb=Infinity;                                    // never reached B: nearest to L
+    for(let i=0;i<n;i++){ const d=Math.abs(t[i]-L); if(d<fb){ fb=d; fi=i; } } }
+  let lo=Math.min(si,fi), hi=Math.max(si,fi);
   const seg = P.slice(lo, hi+1);
   if(seg.length<2) throw new Error('could not find your run along the course line');
   let sum=0, sq=0, mx=0;
   for(const p of seg){ const d=perp(p); sum+=d; sq+=d*d; if(d>mx) mx=d; }
-  const n=seg.length;
+  const m=seg.length;
   const coverage = Math.abs(t[hi]-t[lo])/L;         // fraction of the line actually paddled
-  return { avg:sum/n, rms:Math.sqrt(sq/n), max:mx, coverage, track:rawPts.slice(lo,hi+1) };
+  return { avg:sum/m, rms:Math.sqrt(sq/m), max:mx, coverage, track:rawPts.slice(lo,hi+1) };
 }
 
 // ---------- comparison chart colours ----------

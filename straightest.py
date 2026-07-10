@@ -59,13 +59,21 @@ def read_gpx(path):
 
 
 def score_track(pts):
-    """Keep the slice between the point nearest the start gate and the point
-    nearest the finish gate, then average the perpendicular offset."""
+    """Keep the slice between the start gate and the FIRST time the track reaches
+    the finish gate, then average the perpendicular offset. Scanning outward for
+    the finish (instead of global nearest-to-L) stops a track that is much longer
+    than the line, or loops back, from matching a far-away point."""
     if len(pts) < 5:
         return None
     t = [along(x, y) for (x, y) in pts]
-    si = min(range(len(t)), key=lambda i: abs(t[i]))
-    fi = min(range(len(t)), key=lambda i: abs(t[i] - L))
+    n = len(t)
+    si = min(range(n), key=lambda i: abs(t[i]))
+    th = L * 0.98
+    fi = next((i for i in range(si + 1, n) if t[i] >= th), -1)   # A -> B
+    if fi < 0:
+        fi = next((i for i in range(si - 1, -1, -1) if t[i] >= th), -1)  # B -> A
+    if fi < 0:
+        fi = min(range(n), key=lambda i: abs(t[i] - L))          # never reached B
     lo, hi = min(si, fi), max(si, fi)
     seg = pts[lo:hi + 1]
     if len(seg) < 2:
