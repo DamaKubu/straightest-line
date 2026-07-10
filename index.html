@@ -341,7 +341,7 @@ function jsonbinBackend(){
   return {
     async submit(r){ const rows=upsertBest(await jbGet(), r); await jbPut(rows); render(rows); },
     watch(){ const tick=async()=>{ try{ render(await jbGet()); }catch(e){} };
-             tick(); setInterval(tick, 15000); },   // gentle poll (free-tier friendly)
+             tick(); setInterval(tick, 30000); },   // gentle poll (free-tier friendly)
     async reload(){ render(await jbGet()); },
     async remove(name){ const rows=(await jbGet()).filter(x=>x.name.toLowerCase()!==name.toLowerCase());
              await jbPut(rows); render(rows); },
